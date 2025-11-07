@@ -6,6 +6,7 @@ TARGETS += capabilities
 TARGETS += cgroup
 TARGETS += cpufreq
 TARGETS += cpu-hotplug
+TARGETS += drivers/ntsync
 TARGETS += efivarfs
 TARGETS += exec
 TARGETS += filesystems
