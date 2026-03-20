@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Squashfs - a compressed read only filesystem for Linux
  *
@@ -89,6 +90,10 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 
 	out_buf.size = PAGE_SIZE;
 	out_buf.dst = squashfs_first_page(output);
+	if (IS_ERR(out_buf.dst)) {
+		error = PTR_ERR(out_buf.dst);
+		goto finish;
+	}
 
 	for (;;) {
 		size_t zstd_err;
@@ -103,7 +108,7 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 			}
 
 			avail = min(length, ((int)bvec->bv_len) - offset);
-			data = page_address(bvec->bv_page) + bvec->bv_offset;
+			data = bvec_virt(bvec);
 			length -= avail;
 			in_buf.src = data + offset;
 			in_buf.size = avail;
@@ -113,7 +118,10 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 
 		if (out_buf.pos == out_buf.size) {
 			out_buf.dst = squashfs_next_page(output);
-			if (out_buf.dst == NULL) {
+			if (IS_ERR(out_buf.dst)) {
+				error = PTR_ERR(out_buf.dst);
+				break;
+			} else if (out_buf.dst == NULL) {
 				/* Shouldn't run out of pages
 				 * before stream is done.
 				 */
@@ -138,6 +146,8 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 		}
 	}
 
+finish:
+
 	squashfs_finish_page(output);
 
 	return error ? error : total_out;
@@ -149,5 +159,6 @@ const struct squashfs_decompressor squashfs_zstd_comp_ops = {
 	.decompress = zstd_uncompress,
 	.id = ZSTD_COMPRESSION,
 	.name = "zstd",
+	.alloc_buffer = 1,
 	.supported = 1
 };
