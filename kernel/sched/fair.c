@@ -592,11 +592,6 @@ RB_DECLARE_CALLBACKS(static, min_deadline_cb, struct sched_entity,
  */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	struct rb_node **link = &cfs_rq->tasks_timeline.rb_root.rb_node;
-	struct rb_node *parent = NULL;
-	struct sched_entity *entry;
-	bool leftmost = true;
-
 	avg_vruntime_add(cfs_rq, se);
 	se->min_deadline = se->deadline;
 	rb_add_augmented_cached(&se->run_node, &cfs_rq->tasks_timeline,
