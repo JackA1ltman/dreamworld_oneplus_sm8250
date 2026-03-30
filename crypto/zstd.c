@@ -22,8 +22,8 @@
 #include <linux/zstd.h>
 #include <crypto/internal/scompress.h>
 
-uint compression_level = 1;
-module_param(compression_level, uint, 0644);
+int compression_level = -1;
+module_param(compression_level, int, 0644);
 
 struct zstd_ctx {
 	zstd_cctx *cctx;
@@ -34,8 +34,8 @@ struct zstd_ctx {
 
 static zstd_parameters zstd_params(void)
 {
-	if (compression_level == 0)
-		compression_level = 1;
+	if (compression_level < zstd_min_clevel())
+		compression_level = zstd_min_clevel();
 	if (compression_level > zstd_max_clevel())
 		compression_level = zstd_max_clevel();
 	return zstd_get_params(compression_level, PAGE_SIZE);
