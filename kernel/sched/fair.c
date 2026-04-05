@@ -61,7 +61,6 @@ walt_dec_cfs_rq_stats(struct cfs_rq *cfs_rq, struct task_struct *p) {}
 
 #endif
 
-/*
 
 /*
  * Enable/disable honoring sync flag in energy-aware wakeups.
