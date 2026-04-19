@@ -21,6 +21,12 @@
 #include <linux/spinlock.h>
 #include <uapi/linux/ntsync.h>
 
+#ifndef lockdep_assert
+#define lockdep_assert(cond)        do { (void)(cond); } while (0)
+#define lockdep_is_held(lock)       1
+#define LOCK_STATE_NOT_HELD         0
+#endif
+
 #define NTSYNC_NAME	"ntsync"
 
 enum ntsync_type {
