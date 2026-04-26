@@ -190,7 +190,6 @@ static const u32 bbr_probe_rtt_win_ms = 5000;
 /* Proportion of cwnd to estimated BDP in PROBE_RTT, in units of BBR_UNIT: */
 static const u32 bbr_probe_rtt_cwnd_gain = BBR_UNIT * 1 / 2;
 
-/* We use a high_gain value of 2/ln(2) because it's the smallest pacing gain
 /* Use min_rtt to help adapt TSO burst size, with smaller min_rtt resulting
  * in bigger TSO bursts. We cut the RTT-based allowance in half
  * for every 2^9 usec (aka 512 us) of RTT, so that the RTT-based allowance
