@@ -564,7 +564,6 @@ config MEM_SOFT_DIRTY
 config ZSWAP
 	bool "Compressed cache for swap pages (EXPERIMENTAL)"
 	depends on FRONTSWAP && CRYPTO=y
-	select CRYPTO_LZO
 	select ZPOOL
 	default n
 	help
@@ -580,6 +579,58 @@ config ZSWAP
 	  interactions don't cause any known issues on simple memory setups,
 	  they have not be fully explored on the large set of potential
 	  configurations and workloads that exist.
+
+config ZSWAP_DEFAULT_ON
+	bool "Enable the compressed cache for swap pages by default"
+	depends on ZSWAP
+	help
+	  If selected, zswap will be enabled at boot. You can still override
+	  this with the kernel command line option 'zswap.enabled='.
+
+choice
+	prompt "Default zswap compressor"
+	depends on ZSWAP
+	default ZSWAP_COMPRESSOR_DEFAULT_LZO
+	help
+	  Select the default compressor used by zswap. The choice can still
+	  be overridden with the kernel command line option
+	  'zswap.compressor='.
+
+config ZSWAP_COMPRESSOR_DEFAULT_DEFLATE
+	bool "Deflate"
+	select CRYPTO_DEFLATE
+
+config ZSWAP_COMPRESSOR_DEFAULT_LZO
+	bool "LZO"
+	select CRYPTO_LZO
+
+config ZSWAP_COMPRESSOR_DEFAULT_842
+	bool "842"
+	select CRYPTO_842
+
+config ZSWAP_COMPRESSOR_DEFAULT_LZ4
+	bool "LZ4"
+	select CRYPTO_LZ4
+
+config ZSWAP_COMPRESSOR_DEFAULT_LZ4HC
+	bool "LZ4HC"
+	select CRYPTO_LZ4HC
+
+config ZSWAP_COMPRESSOR_DEFAULT_ZSTD
+	bool "ZSTD"
+	select CRYPTO_ZSTD
+endchoice
+
+config ZSWAP_COMPRESSOR_DEFAULT
+	string
+	depends on ZSWAP
+	default "deflate" if ZSWAP_COMPRESSOR_DEFAULT_DEFLATE
+	default "lzo" if ZSWAP_COMPRESSOR_DEFAULT_LZO
+	default "842" if ZSWAP_COMPRESSOR_DEFAULT_842
+	default "lz4" if ZSWAP_COMPRESSOR_DEFAULT_LZ4
+	default "lz4hc" if ZSWAP_COMPRESSOR_DEFAULT_LZ4HC
+	default "zstd" if ZSWAP_COMPRESSOR_DEFAULT_ZSTD
+	default ""
 
 config ZPOOL
 	tristate "Common API for compressed memory storage"

@@ -73,6 +73,8 @@ static u64 zswap_reject_alloc_fail;
 static u64 zswap_reject_kmemcache_fail;
 /* Duplicate store was encountered (rare) */
 static u64 zswap_duplicate_entry;
+/* Pool limit was hit, we need to calm down before accepting new pages */
+static bool zswap_pool_reached_full;
 
 /*********************************
 * tunables
@@ -80,8 +82,8 @@ static u64 zswap_duplicate_entry;
 
 #define ZSWAP_PARAM_UNSET ""
 
-/* Enable/disable zswap (disabled by default) */
-static bool zswap_enabled;
+/* Enable/disable zswap */
+static bool zswap_enabled = IS_ENABLED(CONFIG_ZSWAP_DEFAULT_ON);
 static int zswap_enabled_param_set(const char *,
 				   const struct kernel_param *);
 static struct kernel_param_ops zswap_enabled_param_ops = {
@@ -91,7 +93,11 @@ static struct kernel_param_ops zswap_enabled_param_ops = {
 module_param_cb(enabled, &zswap_enabled_param_ops, &zswap_enabled, 0644);
 
 /* Crypto compressor to use */
+#ifdef CONFIG_ZSWAP_COMPRESSOR_DEFAULT
+#define ZSWAP_COMPRESSOR_DEFAULT CONFIG_ZSWAP_COMPRESSOR_DEFAULT
+#else
 #define ZSWAP_COMPRESSOR_DEFAULT "lzo"
+#endif
 static char *zswap_compressor = ZSWAP_COMPRESSOR_DEFAULT;
 static int zswap_compressor_param_set(const char *,
 				      const struct kernel_param *);
@@ -117,6 +123,11 @@ module_param_cb(zpool, &zswap_zpool_param_ops, &zswap_zpool_type, 0644);
 /* The maximum percentage of memory that the compressed pool can occupy */
 static unsigned int zswap_max_pool_percent = 20;
 module_param_named(max_pool_percent, zswap_max_pool_percent, uint, 0644);
+
+/* The threshold for accepting new pages after the max_pool_percent was hit */
+static unsigned int zswap_accept_thr_percent = 90;
+module_param_named(accept_threshold_percent, zswap_accept_thr_percent,
+		   uint, 0644);
 
 /* Enable/disable handling same-value filled pages (enabled by default) */
 static bool zswap_same_filled_pages_enabled = true;
@@ -217,10 +228,14 @@ static const struct zpool_ops zswap_zpool_ops = {
 	.evict = zswap_writeback_entry
 };
 
-static bool zswap_is_full(void)
+static unsigned long zswap_max_pages(void)
 {
-	return totalram_pages * zswap_max_pool_percent / 100 <
-		DIV_ROUND_UP(zswap_pool_total_size, PAGE_SIZE);
+	return totalram_pages * zswap_max_pool_percent / 100;
+}
+
+static unsigned long zswap_accept_thr_pages(void)
+{
+	return zswap_max_pages() * zswap_accept_thr_percent / 100;
 }
 
 static void zswap_update_total_size(void)
@@ -236,6 +251,27 @@ static void zswap_update_total_size(void)
 	rcu_read_unlock();
 
 	zswap_pool_total_size = total;
+}
+
+static unsigned long zswap_total_pages(void)
+{
+	return DIV_ROUND_UP(zswap_pool_total_size, PAGE_SIZE);
+}
+
+static bool zswap_check_limits(void)
+{
+	unsigned long cur_pages = zswap_total_pages();
+	unsigned long max_pages = zswap_max_pages();
+
+	if (cur_pages >= max_pages) {
+		zswap_pool_limit_hit++;
+		zswap_pool_reached_full = true;
+	} else if (zswap_pool_reached_full &&
+		   cur_pages <= zswap_accept_thr_pages()) {
+		zswap_pool_reached_full = false;
+	}
+
+	return zswap_pool_reached_full;
 }
 
 /*********************************
@@ -1020,19 +1056,14 @@ static int zswap_frontswap_store(unsigned type, pgoff_t offset,
 	}
 
 	/* reclaim space if needed */
-	if (zswap_is_full()) {
-		zswap_pool_limit_hit++;
+	if (zswap_check_limits()) {
 		if (zswap_shrink()) {
 			zswap_reject_reclaim_fail++;
 			ret = -ENOMEM;
 			goto reject;
 		}
 
-		/* A second zswap_is_full() check after
-		 * zswap_shrink() to make sure it's now
-		 * under the max_pool_percent
-		 */
-		if (zswap_is_full()) {
+		if (zswap_check_limits()) {
 			ret = -ENOMEM;
 			goto reject;
 		}
@@ -1080,7 +1111,9 @@ static int zswap_frontswap_store(unsigned type, pgoff_t offset,
 
 	/* store */
 	hlen = zpool_evictable(entry->pool->zpool) ? sizeof(zhdr) : 0;
-	gfp = GFP_NOWAIT | __GFP_NORETRY | __GFP_HIGHMEM | __GFP_MOVABLE;
+	gfp = GFP_NOWAIT | __GFP_NORETRY;
+	if (zpool_malloc_support_movable(entry->pool->zpool))
+		gfp |= __GFP_HIGHMEM | __GFP_MOVABLE;
 	ret = zpool_malloc(entry->pool->zpool, hlen + dlen, gfp, &handle);
 	if (ret == -ENOSPC) {
 		zswap_reject_compress_poor++;

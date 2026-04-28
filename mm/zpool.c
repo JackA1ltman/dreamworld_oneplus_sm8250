@@ -239,6 +239,20 @@ const char *zpool_get_type(struct zpool *zpool)
 }
 
 /**
+ * zpool_malloc_support_movable() - Check if the zpool can allocate movable
+ *				    backing pages
+ * @zpool:	The zpool to check
+ *
+ * Returns: true if the zpool backend accepts movable/highmem allocations,
+ * false otherwise.
+ */
+bool zpool_malloc_support_movable(struct zpool *zpool)
+{
+	return zpool->driver->malloc_support_movable;
+}
+EXPORT_SYMBOL(zpool_malloc_support_movable);
+
+/**
  * zpool_malloc() - Allocate memory
  * @zpool:	The zpool to allocate from.
  * @size:	The amount of memory to allocate.
