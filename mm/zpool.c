@@ -14,6 +14,7 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/string.h>
 #include <linux/module.h>
 #include <linux/zpool.h>
 
@@ -343,6 +344,44 @@ void *zpool_map_handle(struct zpool *zpool, unsigned long handle,
 void zpool_unmap_handle(struct zpool *zpool, unsigned long handle)
 {
 	zpool->driver->unmap(zpool->pool, handle);
+}
+
+void *zpool_obj_read_begin(struct zpool *zpool, unsigned long handle,
+			   void *local_copy)
+{
+	if (zpool->driver->obj_read_begin)
+		return zpool->driver->obj_read_begin(zpool->pool, handle,
+						     local_copy);
+
+	return zpool_map_handle(zpool, handle, ZPOOL_MM_RO);
+}
+
+void zpool_obj_read_end(struct zpool *zpool, unsigned long handle,
+			void *handle_mem)
+{
+	if (zpool->driver->obj_read_end) {
+		zpool->driver->obj_read_end(zpool->pool, handle, handle_mem);
+		return;
+	}
+
+	(void)handle_mem;
+	zpool_unmap_handle(zpool, handle);
+}
+
+void zpool_obj_write(struct zpool *zpool, unsigned long handle,
+		     void *handle_mem, size_t mem_len)
+{
+	void *dst;
+
+	if (zpool->driver->obj_write) {
+		zpool->driver->obj_write(zpool->pool, handle, handle_mem,
+					 mem_len);
+		return;
+	}
+
+	dst = zpool_map_handle(zpool, handle, ZPOOL_MM_RW);
+	memcpy(dst, handle_mem, mem_len);
+	zpool_unmap_handle(zpool, handle);
 }
 
 /**

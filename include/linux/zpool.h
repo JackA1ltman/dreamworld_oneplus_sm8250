@@ -59,6 +59,17 @@ void *zpool_map_handle(struct zpool *pool, unsigned long handle,
 
 void zpool_unmap_handle(struct zpool *pool, unsigned long handle);
 
+/*
+ * Legacy copy-style helpers kept for older zsmalloc/zram callers.
+ * New code should prefer zpool_map_handle()/zpool_unmap_handle().
+ */
+void *zpool_obj_read_begin(struct zpool *pool, unsigned long handle,
+			   void *local_copy);
+void zpool_obj_read_end(struct zpool *pool, unsigned long handle,
+			void *handle_mem);
+void zpool_obj_write(struct zpool *pool, unsigned long handle,
+		     void *handle_mem, size_t mem_len);
+
 u64 zpool_get_total_size(struct zpool *pool);
 
 
@@ -96,6 +107,17 @@ struct zpool_driver {
 
 	int (*shrink)(void *pool, unsigned int pages,
 				unsigned int *reclaimed);
+
+	/*
+	 * Legacy copy-style accessors. Older zsmalloc-based users still wire
+	 * through these, while newer users provide direct map/unmap callbacks.
+	 */
+	void *(*obj_read_begin)(void *pool, unsigned long handle,
+				void *local_copy);
+	void (*obj_read_end)(void *pool, unsigned long handle,
+			     void *handle_mem);
+	void (*obj_write)(void *pool, unsigned long handle,
+			  void *handle_mem, size_t mem_len);
 
 	void *(*map)(void *pool, unsigned long handle,
 				enum zpool_mapmode mm);

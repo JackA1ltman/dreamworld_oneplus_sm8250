@@ -405,11 +405,30 @@ static int zs_zpool_malloc(void *pool, size_t size, gfp_t gfp,
 			unsigned long *handle)
 {
 	*handle = zs_malloc(pool, size, gfp);
-	return *handle ? 0 : -1;
+
+	return *handle ? 0 : -ENOMEM;
 }
 static void zs_zpool_free(void *pool, unsigned long handle)
 {
 	zs_free(pool, handle);
+}
+
+static void *zs_zpool_obj_read_begin(void *pool, unsigned long handle,
+				     void *local_copy)
+{
+	return zs_obj_read_begin(pool, handle, local_copy);
+}
+
+static void zs_zpool_obj_read_end(void *pool, unsigned long handle,
+				  void *handle_mem)
+{
+	zs_obj_read_end(pool, handle, handle_mem);
+}
+
+static void zs_zpool_obj_write(void *pool, unsigned long handle,
+			       void *handle_mem, size_t mem_len)
+{
+	zs_obj_write(pool, handle, handle_mem, mem_len);
 }
 
 static void *zs_zpool_map(void *pool, unsigned long handle,
@@ -449,6 +468,9 @@ static struct zpool_driver zs_zpool_driver = {
 	.destroy =	zs_zpool_destroy,
 	.malloc =	zs_zpool_malloc,
 	.free =		zs_zpool_free,
+	.obj_read_begin = zs_zpool_obj_read_begin,
+	.obj_read_end =	zs_zpool_obj_read_end,
+	.obj_write =	zs_zpool_obj_write,
 	.map =		zs_zpool_map,
 	.unmap =	zs_zpool_unmap,
 	.total_size =	zs_zpool_total_size,
@@ -1288,6 +1310,16 @@ static bool zspage_full(struct size_class *class, struct zspage *zspage)
 	return get_zspage_inuse(zspage) == class->objs_per_zspage;
 }
 
+unsigned int zs_lookup_class_index(struct zs_pool *pool, unsigned int size)
+{
+	struct size_class *class;
+
+	class = pool->size_class[get_size_class_index(size)];
+
+	return class->index;
+}
+EXPORT_SYMBOL_GPL(zs_lookup_class_index);
+
 unsigned long zs_get_total_pages(struct zs_pool *pool)
 {
 	return atomic_long_read(&pool->pages_allocated);
@@ -1405,6 +1437,39 @@ void zs_unmap_object(struct zs_pool *pool, unsigned long handle)
 	unpin_tag(handle);
 }
 EXPORT_SYMBOL_GPL(zs_unmap_object);
+
+void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
+			void *local_copy)
+{
+	/*
+	 * Keep the legacy helper available for older callers. The modern
+	 * mapping path already provides a stable readable view of the object,
+	 * so @local_copy is only kept for API compatibility.
+	 */
+	(void)local_copy;
+
+	return zs_map_object(pool, handle, ZS_MM_RO);
+}
+EXPORT_SYMBOL_GPL(zs_obj_read_begin);
+
+void zs_obj_read_end(struct zs_pool *pool, unsigned long handle,
+		     void *handle_mem)
+{
+	(void)handle_mem;
+	zs_unmap_object(pool, handle);
+}
+EXPORT_SYMBOL_GPL(zs_obj_read_end);
+
+void zs_obj_write(struct zs_pool *pool, unsigned long handle,
+		  void *handle_mem, size_t mem_len)
+{
+	void *dst;
+
+	dst = zs_map_object(pool, handle, ZS_MM_RW);
+	memcpy(dst, handle_mem, mem_len);
+	zs_unmap_object(pool, handle);
+}
+EXPORT_SYMBOL_GPL(zs_obj_write);
 
 /**
  * zs_huge_class_size() - Returns the size (in bytes) of the first huge

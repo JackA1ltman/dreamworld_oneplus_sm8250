@@ -46,7 +46,9 @@ static void zcomp_strm_free(struct zcomp_strm *zstrm)
 		return;
 
 	zstrm->comp->ops->destroy_ctx(&zstrm->ctx);
+	vfree(zstrm->local_copy);
 	vfree(zstrm->buffer);
+	zstrm->local_copy = NULL;
 	zstrm->buffer = NULL;
 	kfree(zstrm);
 }
@@ -66,8 +68,9 @@ static struct zcomp_strm *zcomp_strm_alloc(struct zcomp *comp)
 		return NULL;
 	}
 
+	zstrm->local_copy = vzalloc(PAGE_SIZE);
 	zstrm->buffer = vzalloc(2 * PAGE_SIZE);
-	if (!zstrm->buffer) {
+	if (!zstrm->buffer || !zstrm->local_copy) {
 		zcomp_strm_free(zstrm);
 		zstrm = NULL;
 	}
@@ -115,13 +118,13 @@ struct zcomp_strm *zcomp_stream_get(struct zcomp *comp)
 	return *get_cpu_ptr(comp->stream);
 }
 
-void zcomp_stream_put(struct zcomp *comp)
+void __zcomp_stream_put_comp(struct zcomp *comp)
 {
 	put_cpu_ptr(comp->stream);
 }
 
-int zcomp_compress(struct zcomp_strm *zstrm,
-		const void *src, unsigned int *dst_len)
+int __zcomp_compress(struct zcomp_strm *zstrm,
+		     const void *src, unsigned int *dst_len)
 {
 	struct zcomp_req req = {
 		.src = src,
@@ -138,8 +141,8 @@ int zcomp_compress(struct zcomp_strm *zstrm,
 	return ret;
 }
 
-int zcomp_decompress(struct zcomp_strm *zstrm,
-		const void *src, unsigned int src_len, void *dst)
+int __zcomp_decompress(struct zcomp_strm *zstrm,
+		       const void *src, unsigned int src_len, void *dst)
 {
 	struct zcomp_req req = {
 		.src = src,
@@ -212,7 +215,8 @@ void zcomp_destroy(struct zcomp *comp)
 	kfree(comp);
 }
 
-struct zcomp *zcomp_create(const char *compress)
+struct zcomp *__zcomp_create(const char *compress,
+			     const struct zcomp_params *params)
 {
 	struct zcomp *comp;
 	int error;
@@ -222,7 +226,10 @@ struct zcomp *zcomp_create(const char *compress)
 		return ERR_PTR(-ENOMEM);
 
 	comp->name = compress;
-	comp->params.level = ZCOMP_PARAM_NO_LEVEL;
+	if (params)
+		comp->params = *params;
+	else
+		comp->params.level = ZCOMP_PARAM_NO_LEVEL;
 	comp->ops = lookup_backend_ops(compress);
 	if (!comp->ops) {
 		kfree(comp);
