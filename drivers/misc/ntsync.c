@@ -19,6 +19,7 @@
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/uaccess.h>
 #include <uapi/linux/ntsync.h>
 
 #ifndef lockdep_assert
