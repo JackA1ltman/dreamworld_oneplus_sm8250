@@ -11140,7 +11140,7 @@ int ufshcd_alloc_host(struct device *dev, struct ufs_hba **hba_handle)
 	 * Do not use blk-mq at this time because blk-mq does not support
 	 * runtime pm.
 	 */
-	host->use_blk_mq = false;
+	host->use_blk_mq = true;
 
 	hba = shost_priv(host);
 	hba->host = host;
