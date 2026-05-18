@@ -248,14 +248,11 @@ static bool rfx_should_update_freq(struct rfx_policy *rfx_pol, u64 time)
 static bool rfx_update_next_freq(struct rfx_policy *rfx_pol, u64 time,
 				 unsigned int next_freq)
 {
-	if (rfx_pol->need_freq_update) {
+	if (rfx_pol->need_freq_update)
 		rfx_pol->need_freq_update = false;
-		if (rfx_pol->next_freq == next_freq &&
-		    !cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS))
-			return false;
-	} else if (rfx_pol->next_freq == next_freq) {
+
+	if (rfx_pol->next_freq == next_freq)
 		return false;
-	}
 
 	rfx_pol->next_freq = next_freq;
 	rfx_pol->last_freq_update_time = time;
@@ -298,7 +295,7 @@ static void rfx_get_util(struct rfx_cpu *rfx_c, unsigned long boost)
 {
 	struct rq *rq = cpu_rq(rfx_c->cpu);
 	unsigned long util = cpu_util_cfs(rq);
-	unsigned long max_cap = arch_scale_cpu_capacity(rfx_c->cpu);
+	unsigned long max_cap = arch_scale_cpu_capacity(NULL, rfx_c->cpu);
 
 	rfx_c->bw_min = cpu_bw_dl(rq);
 	rfx_c->util   = schedutil_cpu_util(rfx_c->cpu, util, max_cap,
@@ -553,7 +550,7 @@ static void rfx_update_single_freq(struct update_util_data *hook, u64 time,
 	unsigned long max_cap, boost, effective_util;
 	unsigned int next_f;
 
-	max_cap = arch_scale_cpu_capacity(rfx_c->cpu);
+	max_cap = arch_scale_cpu_capacity(NULL, rfx_c->cpu);
 
 	rfx_iowait_boost(rfx_c, time, flags);
 	rfx_c->last_update = time;
@@ -604,7 +601,7 @@ static unsigned int rfx_next_freq_shared(struct rfx_cpu *rfx_c, u64 time)
 	unsigned long util = 0, max_cap;
 	unsigned int next_f, j;
 
-	max_cap = arch_scale_cpu_capacity(rfx_c->cpu);
+	max_cap = arch_scale_cpu_capacity(NULL, rfx_c->cpu);
 
 	for_each_cpu(j, policy->cpus) {
 		struct rfx_cpu *j_rfx_c = &per_cpu(rfx_cpu, j);
@@ -758,7 +755,6 @@ static struct attribute *rfx_attrs[] = {
 	&hispeed_filter_shift.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(rfx);
 
 static void rfx_tunables_free(struct kobject *kobj)
 {
@@ -768,7 +764,7 @@ static void rfx_tunables_free(struct kobject *kobj)
 }
 
 static struct kobj_type rfx_tunables_ktype = {
-	.default_groups = rfx_groups,
+	.default_attrs = rfx_attrs,
 	.sysfs_ops = &governor_sysfs_ops,
 	.release = &rfx_tunables_free,
 };
@@ -995,8 +991,7 @@ static int rfx_start(struct cpufreq_policy *policy)
 	rfx_pol->limits_changed		= false;
 	rfx_pol->cached_raw_freq	= 0;
 
-	rfx_pol->need_freq_update =
-		cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS);
+	rfx_pol->need_freq_update = false;
 
 	for_each_cpu(cpu, policy->cpus) {
 		struct rfx_cpu *rfx_c = &per_cpu(rfx_cpu, cpu);
@@ -1034,13 +1029,35 @@ static void rfx_stop(struct cpufreq_policy *policy)
 static void rfx_limits(struct cpufreq_policy *policy)
 {
 	struct rfx_policy *rfx_pol = policy->governor_data;
+	unsigned long flags, now;
+	unsigned int freq;
 
 	if (!policy->fast_switch_enabled) {
 		mutex_lock(&rfx_pol->work_lock);
+		raw_spin_lock_irqsave(&rfx_pol->update_lock, flags);
+		now = ktime_get_ns();
+		rfx_pol->cached_raw_freq = cpufreq_driver_resolve_freq(policy,
+								       policy->cur);
+		rfx_pol->next_freq = rfx_pol->cached_raw_freq;
+		rfx_pol->last_freq_update_time = now;
+		raw_spin_unlock_irqrestore(&rfx_pol->update_lock, flags);
 		cpufreq_policy_apply_limits(policy);
 		mutex_unlock(&rfx_pol->work_lock);
+	} else {
+		raw_spin_lock_irqsave(&rfx_pol->update_lock, flags);
+		freq = cpufreq_driver_resolve_freq(policy, policy->cur);
+		now = ktime_get_ns();
+		rfx_pol->cached_raw_freq = freq;
+		rfx_pol->next_freq = freq;
+		rfx_pol->last_freq_update_time = now;
+		cpufreq_driver_fast_switch(policy, freq);
+		raw_spin_unlock_irqrestore(&rfx_pol->update_lock, flags);
 	}
 
+	/*
+	 * Keep the next update path aware that policy limits have changed.
+	 * This mirrors schedutil/walt and prevents stale cached frequencies.
+	 */
 	smp_wmb();
 
 	WRITE_ONCE(rfx_pol->limits_changed, true);
@@ -1049,7 +1066,7 @@ static void rfx_limits(struct cpufreq_policy *policy)
 static struct cpufreq_governor reflex_gov = {
 	.name			= "reflex",
 	.owner			= THIS_MODULE,
-	.flags			= CPUFREQ_GOV_DYNAMIC_SWITCHING,
+	.dynamic_switching	= true,
 	.init			= rfx_init,
 	.exit			= rfx_exit,
 	.start			= rfx_start,
