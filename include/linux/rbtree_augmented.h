@@ -109,8 +109,8 @@ rb_add_augmented_cached(struct rb_node *node, struct rb_root_cached *tree,
  * RBCOMPUTE:   name of function that recomputes the RBAUGMENTED data
  */
 
-#define RB_DECLARE_CALLBACKS(RBSTATIC, RBNAME,				\
-			     RBSTRUCT, RBFIELD, RBAUGMENTED, RBCOMPUTE)	\
+#define __RB_DECLARE_CALLBACKS(RBSTATIC, RBNAME,			\
+			       RBSTRUCT, RBFIELD, RBAUGMENTED, RBCOMPUTE)	\
 static inline void							\
 RBNAME ## _propagate(struct rb_node *rb, struct rb_node *stop)		\
 {									\
@@ -141,6 +141,40 @@ RBSTATIC const struct rb_augment_callbacks RBNAME = {			\
 	.copy = RBNAME ## _copy,					\
 	.rotate = RBNAME ## _rotate					\
 };
+
+#define __RB_DECLARE_CALLBACKS_6(RBSTATIC, RBNAME,			\
+				 RBSTRUCT, RBFIELD, RBAUGMENTED, RBCOMPUTE) \
+__RB_DECLARE_CALLBACKS(RBSTATIC, RBNAME,					\
+		       RBSTRUCT, RBFIELD, RBAUGMENTED, RBCOMPUTE)
+
+#define __RB_DECLARE_CALLBACKS_7(RBSTATIC, RBNAME,			\
+				 RBSTRUCT, RBFIELD, RBTYPE, RBAUGMENTED, \
+				 RBCOMPUTE)				\
+static inline bool							\
+RBNAME ## _compute_augmented(RBSTRUCT *node, bool exit)			\
+{									\
+	RBTYPE augmented = RBCOMPUTE(node);				\
+	if (exit && node->RBAUGMENTED == augmented)			\
+		return true;						\
+	node->RBAUGMENTED = augmented;					\
+	return false;							\
+}									\
+__RB_DECLARE_CALLBACKS(RBSTATIC, RBNAME,					\
+		       RBSTRUCT, RBFIELD, RBAUGMENTED,			\
+		       RBNAME ## _compute_augmented)
+
+#define __RB_DECLARE_CALLBACKS_SELECT(_1, _2, _3, _4, _5, _6, _7, NAME, ...) \
+	NAME
+
+/*
+ * Accept both the newer bool-returning recompute callback and the older
+ * scalar-returning form still used by several backported users.
+ */
+#define RB_DECLARE_CALLBACKS(...)					\
+	__RB_DECLARE_CALLBACKS_SELECT(__VA_ARGS__,			\
+				      __RB_DECLARE_CALLBACKS_7,		\
+				      __RB_DECLARE_CALLBACKS_6)		\
+	(__VA_ARGS__)
 
 
 /*
