@@ -88,4 +88,4 @@ static inline void ntfs_free(void *addr)
 	kvfree(addr);
 }
 
-#endif /* _LINUX_NTFS_MALLOC_H */
+#endif

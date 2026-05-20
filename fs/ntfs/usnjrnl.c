@@ -81,4 +81,4 @@ bool ntfs_stamp_usnjrnl(ntfs_volume *vol)
 	return true;
 }
 
-#endif /* NTFS_RW */
+#endif

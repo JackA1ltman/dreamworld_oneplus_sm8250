@@ -66,4 +66,4 @@ typedef enum {
 	IGNORE_CASE = 1,
 } IGNORE_CASE_BOOL;
 
-#endif /* _LINUX_NTFS_TYPES_H */
+#endif

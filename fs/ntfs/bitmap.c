@@ -1,34 +1,112 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * bitmap.c - NTFS kernel bitmap handling.  Part of the Linux-NTFS project.
+ * NTFS kernel bitmap handling.
  *
  * Copyright (c) 2004-2005 Anton Altaparmakov
- *
- * This program/include file is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as published
- * by the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program/include file is distributed in the hope that it will be
- * useful, but WITHOUT ANY WARRANTY; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program (in the main directory of the Linux-NTFS
- * distribution in the file COPYING); if not, write to the Free Software
- * Foundation,Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * Copyright (c) 2025 LG Electronics Co., Ltd.
  */
 
-#ifdef NTFS_RW
-
-#include <linux/pagemap.h>
+#include <linux/bitops.h>
+#include <linux/blkdev.h>
 
 #include "bitmap.h"
-#include "debug.h"
-#include "aops.h"
 #include "ntfs.h"
 
-/**
+/* Forward declaration from inode.c */
+struct page *ntfs_get_locked_folio(struct address_space *mapping,
+		pgoff_t index, pgoff_t end_index, struct file_ra_state *ra);
+
+int ntfs_trim_fs(struct ntfs_volume *vol, struct fstrim_range *range)
+{
+	size_t buf_clusters;
+	pgoff_t index, start_index, end_index;
+	struct file_ra_state *ra;
+	struct page *page;
+	unsigned long *bitmap;
+	char *kaddr;
+	u64 end, trimmed = 0, start_buf, end_buf, end_cluster;
+	u64 start_cluster = ntfs_bytes_to_cluster(vol, range->start);
+	struct request_queue *q = bdev_get_queue(vol->sb->s_bdev);
+	u32 dq = q ? q->limits.discard_granularity : vol->cluster_size;
+	int ret = 0;
+
+	if (!dq)
+		dq = vol->cluster_size;
+
+	if (start_cluster >= vol->nr_clusters)
+		return -EINVAL;
+
+	if (range->len == (u64)-1)
+		end_cluster = vol->nr_clusters;
+	else {
+		end_cluster = ntfs_bytes_to_cluster(vol,
+				(range->start + range->len + vol->cluster_size - 1));
+		if (end_cluster > vol->nr_clusters)
+			end_cluster = vol->nr_clusters;
+	}
+
+	ra = kzalloc(sizeof(*ra), GFP_NOFS);
+	if (!ra)
+		return -ENOMEM;
+
+	buf_clusters = PAGE_SIZE * 8;
+	start_index = start_cluster >> 15;
+	end_index = (end_cluster + buf_clusters - 1) >> 15;
+
+	for (index = start_index; index < end_index; index++) {
+		page = ntfs_get_locked_folio(vol->lcnbmp_ino->i_mapping,
+				index, end_index, ra);
+		if (IS_ERR(page)) {
+			ret = PTR_ERR(page);
+			goto out_free;
+		}
+
+		kaddr = page_address(page);
+		bitmap = (unsigned long *)kaddr;
+
+		start_buf = max_t(u64, index * buf_clusters, start_cluster);
+		end_buf = min_t(u64, (index + 1) * buf_clusters, end_cluster);
+
+		end = start_buf;
+		while (end < end_buf) {
+			u64 aligned_start, aligned_count;
+			u64 start = find_next_zero_bit(bitmap, end_buf - start_buf,
+					end - start_buf) + start_buf;
+			if (start >= end_buf)
+				break;
+
+			end = find_next_bit(bitmap, end_buf - start_buf,
+					start - start_buf) + start_buf;
+
+			aligned_start = ALIGN(ntfs_cluster_to_bytes(vol, start), dq);
+			aligned_count =
+				ALIGN_DOWN(ntfs_cluster_to_bytes(vol, end - start), dq);
+			if (aligned_count >= range->minlen) {
+				ret = blkdev_issue_discard(vol->sb->s_bdev, aligned_start >> 9,
+						aligned_count >> 9, GFP_NOFS, 0);
+				if (ret)
+					goto out_unmap;
+				trimmed += aligned_count;
+			}
+		}
+
+out_unmap:
+		kunmap(page);
+		unlock_page(page);
+		put_page(page);
+
+		if (ret)
+			goto out_free;
+	}
+
+	range->len = trimmed;
+
+out_free:
+	kfree(ra);
+	return ret;
+}
+
+/*
  * __ntfs_bitmap_set_bits_in_run - set a run of bits in a bitmap to a value
  * @vi:			vfs inode describing the bitmap
  * @start_bit:		first bit to set
@@ -50,19 +128,25 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 	s64 cnt = count;
 	pgoff_t index, end_index;
 	struct address_space *mapping;
+#if 0
 	struct page *page;
+#else
+	struct page *page;
+#endif
 	u8 *kaddr;
-	int pos, len;
+	int pos, len, err;
 	u8 bit;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ntfs_volume *vol = ni->vol;
 
-	BUG_ON(!vi);
-	ntfs_debug("Entering for i_ino 0x%lx, start_bit 0x%llx, count 0x%llx, "
-			"value %u.%s", vi->i_ino, (unsigned long long)start_bit,
+	ntfs_debug("Entering for i_ino 0x%llx, start_bit 0x%llx, count 0x%llx, value %u.%s",
+			ni->mft_no, (unsigned long long)start_bit,
 			(unsigned long long)cnt, (unsigned int)value,
 			is_rollback ? " (rollback)" : "");
-	BUG_ON(start_bit < 0);
-	BUG_ON(cnt < 0);
-	BUG_ON(value > 1);
+
+	if (start_bit < 0 || cnt < 0 || value > 1)
+		return -EINVAL;
+
 	/*
 	 * Calculate the indices for the pages containing the first and last
 	 * bits, i.e. @start_bit and @start_bit + @cnt - 1, respectively.
@@ -72,14 +156,31 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 
 	/* Get the page containing the first bit (@start_bit). */
 	mapping = vi->i_mapping;
-	page = ntfs_map_page(mapping, index);
+#if 0
+	folio = read_mapping_page(mapping, index, NULL);
 	if (IS_ERR(page)) {
 		if (!is_rollback)
-			ntfs_error(vi->i_sb, "Failed to map first page (error "
-					"%li), aborting.", PTR_ERR(page));
+			ntfs_error(vi->i_sb,
+				"Failed to map first page (error %li), aborting.",
+				PTR_ERR(page));
 		return PTR_ERR(page);
 	}
+
+	lock_page(page);
 	kaddr = page_address(page);
+#else
+	page = read_mapping_page(mapping, index, NULL);
+	if (IS_ERR(page)) {
+		if (!is_rollback)
+			ntfs_error(vi->i_sb,
+				"Failed to map first page (error %li), aborting.",
+				PTR_ERR(page));
+		return PTR_ERR(page);
+	}
+
+	lock_page(page);
+	kaddr = page_address(page);
+#endif
 
 	/* Set @pos to the position of the byte containing @start_bit. */
 	pos = (start_bit >> 3) & ~PAGE_MASK;
@@ -90,6 +191,9 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 	/* If the first byte is partial, modify the appropriate bits in it. */
 	if (bit) {
 		u8 *byte = kaddr + pos;
+
+		if (ni->mft_no == FILE_Bitmap)
+			ntfs_set_lcn_empty_bits(vol, index, value, min_t(s64, 8 - bit, cnt));
 		while ((bit & 7) && cnt) {
 			cnt--;
 			if (value)
@@ -111,6 +215,8 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 	len = min_t(s64, cnt >> 3, PAGE_SIZE - pos);
 	memset(kaddr + pos, value ? 0xff : 0, len);
 	cnt -= len << 3;
+	if (ni->mft_no == FILE_Bitmap)
+		ntfs_set_lcn_empty_bits(vol, index, value, len << 3);
 
 	/* Update @len to point to the first not-done byte in the page. */
 	if (cnt < 8)
@@ -118,16 +224,46 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 
 	/* If we are not in the last page, deal with all subsequent pages. */
 	while (index < end_index) {
-		BUG_ON(cnt <= 0);
-
-		/* Update @index and get the next page. */
-		flush_dcache_page(page);
-		set_page_dirty(page);
-		ntfs_unmap_page(page);
-		page = ntfs_map_page(mapping, ++index);
-		if (IS_ERR(page))
+		if (cnt <= 0) {
+			err = -EIO;
 			goto rollback;
+		}
+
+#if 0
+		/* Update @index and get the next folio. */
+		set_page_dirty(page);
+		unlock_page(page);
+		kunmap_local(kaddr);
+		put_page(page);
+		folio = read_mapping_page(mapping, ++index, NULL);
+		if (IS_ERR(page)) {
+			ntfs_error(vi->i_sb,
+				   "Failed to map subsequent page (error %li), aborting.",
+				   PTR_ERR(page));
+			err = PTR_ERR(page);
+			goto rollback;
+		}
+
+		lock_page(page);
 		kaddr = page_address(page);
+#else
+		/* Update @index and get the next page. */
+		set_page_dirty(page);
+		unlock_page(page);
+		kunmap(page);
+		put_page(page);
+		page = read_mapping_page(mapping, ++index, NULL);
+		if (IS_ERR(page)) {
+			ntfs_error(vi->i_sb,
+				   "Failed to map subsequent page (error %li), aborting.",
+				   PTR_ERR(page));
+			err = PTR_ERR(page);
+			goto rollback;
+		}
+
+		lock_page(page);
+		kaddr = page_address(page);
+#endif
 		/*
 		 * Depending on @value, modify all remaining whole bytes in the
 		 * page up to @cnt.
@@ -135,6 +271,8 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 		len = min_t(s64, cnt >> 3, PAGE_SIZE);
 		memset(kaddr, value ? 0xff : 0, len);
 		cnt -= len << 3;
+		if (ni->mft_no == FILE_Bitmap)
+			ntfs_set_lcn_empty_bits(vol, index, value, len << 3);
 	}
 	/*
 	 * The currently mapped page is the last one.  If the last byte is
@@ -144,10 +282,12 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 	if (cnt) {
 		u8 *byte;
 
-		BUG_ON(cnt > 7);
+		WARN_ON(cnt > 7);
 
 		bit = cnt;
 		byte = kaddr + len;
+		if (ni->mft_no == FILE_Bitmap)
+			ntfs_set_lcn_empty_bits(vol, index, value, bit);
 		while (bit--) {
 			if (value)
 				*byte |= 1 << bit;
@@ -156,10 +296,18 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 		}
 	}
 done:
-	/* We are done.  Unmap the page and return success. */
-	flush_dcache_page(page);
+	/* We are done.  Unmap the folio and return success. */
+#if 0
 	set_page_dirty(page);
-	ntfs_unmap_page(page);
+	unlock_page(page);
+	kunmap_local(kaddr);
+	put_page(page);
+#else
+	set_page_dirty(page);
+	unlock_page(page);
+	kunmap(page);
+	put_page(page);
+#endif
 	ntfs_debug("Done.");
 	return 0;
 rollback:
@@ -169,7 +317,7 @@ rollback:
 	 *	- @count - @cnt is the number of bits that have been modified
 	 */
 	if (is_rollback)
-		return PTR_ERR(page);
+		return err;
 	if (count != cnt)
 		pos = __ntfs_bitmap_set_bits_in_run(vi, start_bit, count - cnt,
 				value ? 0 : 1, true);
@@ -177,17 +325,15 @@ rollback:
 		pos = 0;
 	if (!pos) {
 		/* Rollback was successful. */
-		ntfs_error(vi->i_sb, "Failed to map subsequent page (error "
-				"%li), aborting.", PTR_ERR(page));
+		ntfs_error(vi->i_sb,
+			"Failed to map subsequent page (error %i), aborting.",
+			err);
 	} else {
 		/* Rollback failed. */
-		ntfs_error(vi->i_sb, "Failed to map subsequent page (error "
-				"%li) and rollback failed (error %i).  "
-				"Aborting and leaving inconsistent metadata.  "
-				"Unmount and run chkdsk.", PTR_ERR(page), pos);
+		ntfs_error(vi->i_sb,
+			"Failed to map subsequent page (error %i) and rollback failed (error %i). Aborting and leaving inconsistent metadata. Unmount and run chkdsk.",
+			err, pos);
 		NVolSetErrors(NTFS_SB(vi->i_sb));
 	}
-	return PTR_ERR(page);
+	return err;
 }
-
-#endif /* NTFS_RW */
