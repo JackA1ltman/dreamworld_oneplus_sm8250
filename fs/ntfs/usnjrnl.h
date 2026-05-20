@@ -200,6 +200,6 @@ typedef struct {
 
 extern bool ntfs_stamp_usnjrnl(ntfs_volume *vol);
 
-#endif /* NTFS_RW */
+#endif
 
-#endif /* _LINUX_NTFS_USNJRNL_H */
+#endif

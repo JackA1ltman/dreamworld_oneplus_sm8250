@@ -90,4 +90,4 @@ static inline sle64 cpu_to_sle64p(s64 *x)
 	return (__force sle64)cpu_to_le64(*x);
 }
 
-#endif /* _LINUX_NTFS_ENDIAN_H */
+#endif
