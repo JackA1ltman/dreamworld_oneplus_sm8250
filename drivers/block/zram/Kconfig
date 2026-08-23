@@ -33,6 +33,12 @@ config ZRAM_BACKEND_ZSTD
 	select ZSTD_COMPRESS
 	select ZSTD_DECOMPRESS
 
+config ZRAM_BACKEND_ZXC
+	bool "zxc compression support"
+	depends on ZRAM
+	select ZXC_COMPRESS
+	select ZXC_DECOMPRESS
+
 config ZRAM_BACKEND_DEFLATE
 	bool "deflate compression support"
 	depends on ZRAM
@@ -48,8 +54,8 @@ config ZRAM_BACKEND_842
 config ZRAM_BACKEND_FORCE_LZO
 	depends on ZRAM
 	def_bool !ZRAM_BACKEND_LZ4 && !ZRAM_BACKEND_LZ4HC && \
-		!ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_DEFLATE && \
-		!ZRAM_BACKEND_842
+		!ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_ZXC && \
+		!ZRAM_BACKEND_DEFLATE && !ZRAM_BACKEND_842
 
 config ZRAM_BACKEND_LZO
 	bool "lzo and lzo-rle compression support" if !ZRAM_BACKEND_FORCE_LZO
@@ -87,6 +93,10 @@ config ZRAM_DEF_COMP_ZSTD
 	bool "zstd"
 	depends on ZRAM_BACKEND_ZSTD
 
+config ZRAM_DEF_COMP_ZXC
+	bool "zxc"
+	depends on ZRAM_BACKEND_ZXC
+
 config ZRAM_DEF_COMP_DEFLATE
 	bool "deflate"
 	depends on ZRAM_BACKEND_DEFLATE
@@ -102,6 +112,7 @@ config ZRAM_DEF_COMP
 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
 	default "842" if ZRAM_DEF_COMP_842
 	default "zstd" if ZRAM_DEF_COMP_ZSTD
+	default "zxc" if ZRAM_DEF_COMP_ZXC
 	default "deflate" if ZRAM_DEF_COMP_DEFLATE
 	default "lzo"
 

@@ -1861,6 +1861,18 @@ config CRYPTO_ZSTD
 	help
 	  This is the zstd algorithm.
 
+config CRYPTO_ZXC
+	tristate "ZXC compression algorithm"
+	select CRYPTO_ALGAPI
+	select CRYPTO_ACOMP2
+	select ZXC_COMPRESS
+	select ZXC_DECOMPRESS
+	help
+	  This is the ZXC algorithm: a high-performance, asymmetric lossless
+	  compressor (fast decode, denser encode at higher levels) from the
+	  libzxc project, exposed through the Crypto API so zswap and other
+	  users can select it alongside lz4/zstd/lzo.
+
 comment "Random Number Generation"
 
 config CRYPTO_ANSI_CPRNG
