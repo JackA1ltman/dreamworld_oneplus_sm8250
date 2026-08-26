@@ -28,6 +28,8 @@
 #define PTE_WRITE		(PTE_DBM)		 /* same as DBM (51) */
 #define PTE_DIRTY		(_AT(pteval_t, 1) << 55)
 #define PTE_SPECIAL		(_AT(pteval_t, 1) << 56)
+#define PTE_UFFD		(_AT(pteval_t, 1) << 59) /* userfaultfd write-protect */
+#define PTE_SWP_UFFD		(_AT(pteval_t, 1) << 60) /* uffd-wp state in swap entries */
 #define PTE_PROT_NONE		(_AT(pteval_t, 1) << 58) /* only when !PTE_VALID */
 
 #ifndef __ASSEMBLY__

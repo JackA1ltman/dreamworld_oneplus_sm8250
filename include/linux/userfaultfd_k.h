@@ -55,11 +55,14 @@ enum mcopy_atomic_mode {
 extern int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
 				    struct vm_area_struct *dst_vma,
 				    unsigned long dst_addr, struct page *page,
-				    bool newly_allocated);
+				    bool newly_allocated, bool wp_copy);
 
 extern ssize_t mcopy_atomic(struct mm_struct *dst_mm, unsigned long dst_start,
 			    unsigned long src_start, unsigned long len,
-			    bool *mmap_changing);
+			    bool *mmap_changing, __u64 mode);
+extern int mwriteprotect_range(struct mm_struct *dst_mm,
+			       unsigned long start, unsigned long len,
+			       bool enable_wp, bool *mmap_changing);
 extern ssize_t mfill_zeropage(struct mm_struct *dst_mm,
 			      unsigned long dst_start,
 			      unsigned long len,
@@ -103,6 +106,18 @@ static inline bool userfaultfd_minor(struct vm_area_struct *vma)
 static inline bool userfaultfd_wp(struct vm_area_struct *vma)
 {
 	return vma->vm_flags & VM_UFFD_WP;
+}
+
+static inline bool userfaultfd_pte_wp(struct vm_area_struct *vma,
+				      pte_t pte)
+{
+	return userfaultfd_wp(vma) && pte_uffd_wp(pte);
+}
+
+static inline bool userfaultfd_huge_pmd_wp(struct vm_area_struct *vma,
+					   pmd_t pmd)
+{
+	return userfaultfd_wp(vma) && pmd_uffd_wp(pmd);
 }
 
 static inline bool userfaultfd_armed(struct vm_area_struct *vma)
@@ -155,6 +170,18 @@ static inline bool userfaultfd_minor(struct vm_area_struct *vma)
 }
 
 static inline bool userfaultfd_wp(struct vm_area_struct *vma)
+{
+	return false;
+}
+
+static inline bool userfaultfd_pte_wp(struct vm_area_struct *vma,
+				      pte_t pte)
+{
+	return false;
+}
+
+static inline bool userfaultfd_huge_pmd_wp(struct vm_area_struct *vma,
+					   pmd_t pmd)
 {
 	return false;
 }
