@@ -4752,10 +4752,12 @@ wma_update_target_vht_cap(struct target_psoc_info *tgt_hdl,
 	if (vht_cap_info & WMI_VHT_CAP_CH_WIDTH_80P80_160MHZ) {
 		cfg->supp_chan_width = 1 << eHT_CHANNEL_WIDTH_80P80MHZ;
 		cfg->supp_chan_width |= 1 << eHT_CHANNEL_WIDTH_160MHZ;
+		cfg->supp_chan_width |= 1 << eHT_CHANNEL_WIDTH_80MHZ;
 	} else if (vht_cap_info & WMI_VHT_CAP_CH_WIDTH_160MHZ) {
 		cfg->supp_chan_width = 1 << eHT_CHANNEL_WIDTH_160MHZ;
+		cfg->supp_chan_width |= 1 << eHT_CHANNEL_WIDTH_80MHZ;
 	} else {
-		cfg->supp_chan_width = 1 << eHT_CHANNEL_WIDTH_80MHZ;
+		cfg->supp_chan_width = (1 << eHT_CHANNEL_WIDTH_160MHZ) | (1 << eHT_CHANNEL_WIDTH_80MHZ);
 	}
 
 	cfg->vht_rx_ldpc = vht_cap_info & WMI_VHT_CAP_RX_LDPC;
