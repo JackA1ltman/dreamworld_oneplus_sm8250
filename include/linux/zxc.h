@@ -2,7 +2,7 @@
 /*
  * ZXC - High-performance lossless compression
  *
- * Kernel public API header (port of upstream ZXC 0.13.3 to the Linux kernel).
+ * Kernel public API header (port of upstream ZXC 0.14.0 to the Linux kernel).
  *
  * This header merges the upstream zxc_constants.h, zxc_error.h, zxc_opts.h and
  * the subset of zxc_buffer.h that is compiled into the kernel build:
@@ -33,8 +33,8 @@ extern "C" {
 /* ---- Library version ----------------------------------------------------- */
 
 #define ZXC_VERSION_MAJOR 0
-#define ZXC_VERSION_MINOR 13
-#define ZXC_VERSION_PATCH 3
+#define ZXC_VERSION_MINOR 14
+#define ZXC_VERSION_PATCH 0
 
 #define ZXC_STR_HELPER(x) #x
 #define ZXC_STR(x) ZXC_STR_HELPER(x)

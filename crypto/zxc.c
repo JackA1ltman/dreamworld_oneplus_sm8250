@@ -1,7 +1,7 @@
 /*
  * Cryptographic API.
  *
- * ZXC compression algorithm (kernel port of upstream libzxc 0.13.3).
+ * ZXC compression algorithm (kernel port of upstream libzxc 0.14.0).
  *
  * Wraps the block-level API exported by lib/zxc (see include/linux/zxc.h) in
  * the standard Crypto API compress / scompress interfaces, so any Crypto API
