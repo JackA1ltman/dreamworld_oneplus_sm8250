@@ -44,6 +44,8 @@ struct usbpd_svid_handler {
 	/* DP driver -> PE driver for requesting USB SS lanes */
 	int (*request_usb_ss_lane)(struct usbpd *pd,
 			struct usbpd_svid_handler *hdlr);
+	int (*release_usb_ss_lane)(struct usbpd *pd,
+			struct usbpd_svid_handler *hdlr);
 
 	/* Unstructured VDM */
 	void (*vdm_received)(struct usbpd_svid_handler *hdlr, u32 vdm_hdr,
@@ -102,6 +104,7 @@ int usbpd_send_svdm(struct usbpd *pd, u16 svid, u8 cmd,
 enum plug_orientation usbpd_get_plug_orientation(struct usbpd *pd);
 
 void usbpd_vdm_in_suspend(struct usbpd *pd, bool in_suspend);
+int usbpd_return_ss_lane(struct usbpd *pd, u16 svid);
 #else
 static inline struct usbpd *devm_usbpd_get_by_phandle(struct device *dev,
 		const char *phandle)
@@ -139,6 +142,7 @@ static inline enum plug_orientation usbpd_get_plug_orientation(struct usbpd *pd)
 }
 
 static inline void usbpd_vdm_in_suspend(struct usbpd *pd, bool in_suspend) { }
+static inline int usbpd_return_ss_lane(struct usbpd *pd, u16 svid) { return 0; }
 #endif /* IS_ENABLED(CONFIG_USB_PD_POLICY) */
 
 /*

@@ -82,6 +82,15 @@ int usb_choose_configuration(struct usb_device *udev)
 	if (usb_device_is_owned(udev))
 		return 0;
 
+	/* ASIX AX88179 / AX88179A: config 1 is vendor-specific for ax_usb_nic,
+	 * while config 2 is generic CDC NCM. Choose config 1 directly to prevent
+	 * cdc_ncm from binding and causing conflict/crash on enumeration.
+	 */
+	if (le16_to_cpu(udev->descriptor.idVendor) == 0x0b95 &&
+	    (le16_to_cpu(udev->descriptor.idProduct) == 0x1790 ||
+	     le16_to_cpu(udev->descriptor.idProduct) == 0x178a))
+		return 1;
+
 	best = NULL;
 	c = udev->config;
 	num_configs = udev->descriptor.bNumConfigurations;

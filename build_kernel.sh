@@ -141,8 +141,8 @@ do_build() {
         rm -rf out
     fi
 
-    make ARCH=arm64 O=out CC="ccache clang" LD=ld.lld CROSS_COMPILE=$PWD/build_toolchain/gcc_64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$PWD/build_toolchain/gcc_32/bin/arm-linux-androideabi- vendor/kona-perf_defconfig vendor/oplus.config vendor/droidspaces.config
-    make ARCH=arm64 O=out CC="ccache clang" LD=ld.lld CROSS_COMPILE=$PWD/build_toolchain/gcc_64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$PWD/build_toolchain/gcc_32/bin/arm-linux-androideabi- -j$(nproc --all)
+    make ARCH=arm64 O=out LLVM=1 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$PWD/build_toolchain/gcc_64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$PWD/build_toolchain/gcc_32/bin/arm-linux-androideabi- vendor/kona-perf_defconfig vendor/oplus.config vendor/droidspaces.config
+    make ARCH=arm64 O=out LLVM=1 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$PWD/build_toolchain/gcc_64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$PWD/build_toolchain/gcc_32/bin/arm-linux-androideabi- -j$(nproc --all)
 }
 
 do_package() {
@@ -150,8 +150,8 @@ do_package() {
     if [ -f "out/arch/arm64/boot/Image" ] && [ -f "out/arch/arm64/boot/dtbo.img" ] && [ -f "out/arch/arm64/boot/dtb" ]; then
         BUILD_TIMESTAMP=$(date +%s)
 
-        if [ -d "Anykernel3" ]; then
-            info "Detect Anykernel3, Skip."
+        if [ -d "AnyKernel3" ]; then
+            info "Detect AnyKernel3, Skip."
 
             if [ -f "AnyKernel3/Image" ] || [ -f "AnyKernel3/dtbo.img" ] || [ -f "AnyKernel3/dtb" ]; then
                 rm -f AnyKernel3/Image
@@ -170,12 +170,32 @@ do_package() {
         cp -fp out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
         cp -fp out/arch/arm64/boot/dtb AnyKernel3/dtb
 
-        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' Anykernel3/anykernel.sh
-        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' Anykernel3/anykernel.sh
-        sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' Anykernel3/anykernel.sh
+        BUILD_DEVICE="${BUILD_DEVICE:-Dreamworld}"
+        ZIP_NAME="${BUILD_DEVICE}_kona_${BUILD_TIMESTAMP}.zip"
 
-        7za a -mx9 ${BUILD_DEVICE}_kona_${BUILD_TIMESTAMP}.zip AnyKernel3/*
-        info "Packed Anykernel3, filename: ${BUILD_DEVICE}_kona_${BUILD_TIMESTAMP}.zip"
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' AnyKernel3/anykernel.sh
+        sed -i 's/ExampleKernel by osm0sis @ xda-developers/Dreamworld Kernel for OnePlus SM8250/g' AnyKernel3/anykernel.sh
+
+        # Remove Galaxy Nexus (tuna) sample modifications
+        sed -i '/init\.rc/d' AnyKernel3/anykernel.sh
+        sed -i '/backup_file/d' AnyKernel3/anykernel.sh
+        sed -i '/replace_string/d' AnyKernel3/anykernel.sh
+        sed -i '/init\.tuna\.rc/d' AnyKernel3/anykernel.sh
+        sed -i '/fstab\.tuna/d' AnyKernel3/anykernel.sh
+
+        TARGET_ZIP="${PWD}/${ZIP_NAME}"
+        rm -f "$TARGET_ZIP"
+        (
+            cd AnyKernel3
+            if command -v zip >/dev/null 2>&1; then
+                zip -r9 -q "$TARGET_ZIP" * -x .git README.md "*placeholder*"
+            else
+                7za a -mx9 "$TARGET_ZIP" * -x!.git -x!README.md -xr!placeholder >/dev/null
+            fi
+        )
+        info "Packed AnyKernel3, filename: ${ZIP_NAME}"
     else
         error "Could not found Image, dtbo.img and dtb. Please build kernel."
         exit 1
