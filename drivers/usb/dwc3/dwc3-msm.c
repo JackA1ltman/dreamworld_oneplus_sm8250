@@ -2743,6 +2743,30 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc, bool enable_wakeup)
 	return 0;
 }
 
+static enum plug_orientation dwc3_msm_get_typec_orientation(struct dwc3_msm *mdwc)
+{
+	union power_supply_propval val;
+	int ret;
+
+	if (!mdwc->usb_psy)
+		mdwc->usb_psy = power_supply_get_by_name("usb");
+
+	if (!mdwc->usb_psy)
+		return ORIENTATION_NONE;
+
+	ret = power_supply_get_property(mdwc->usb_psy,
+			POWER_SUPPLY_PROP_TYPEC_CC_ORIENTATION, &val);
+	if (ret)
+		return ORIENTATION_NONE;
+
+	if (val.intval == 1)
+		return ORIENTATION_CC1;
+	else if (val.intval == 2)
+		return ORIENTATION_CC2;
+
+	return ORIENTATION_NONE;
+}
+
 static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 {
 	int ret;
@@ -2839,13 +2863,26 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 	/* Resume SS PHY */
 	if (dwc->maximum_speed >= USB_SPEED_SUPER &&
 			mdwc->lpm_flags & MDWC3_SS_PHY_SUSPEND) {
+		enum plug_orientation orient = mdwc->typec_orientation;
+
+		if (!mdwc->orientation_override) {
+			enum plug_orientation psy_orient =
+				dwc3_msm_get_typec_orientation(mdwc);
+			if (psy_orient != ORIENTATION_NONE) {
+				orient = psy_orient;
+				mdwc->typec_orientation = psy_orient;
+			}
+		}
+
 		mdwc->ss_phy->flags &= ~(PHY_LANE_A | PHY_LANE_B);
 		if (mdwc->orientation_override)
 			mdwc->ss_phy->flags |= mdwc->orientation_override;
-		else if (mdwc->typec_orientation == ORIENTATION_CC1)
+		else if (orient == ORIENTATION_CC1)
 			mdwc->ss_phy->flags |= PHY_LANE_A;
-		else if (mdwc->typec_orientation == ORIENTATION_CC2)
+		else if (orient == ORIENTATION_CC2)
 			mdwc->ss_phy->flags |= PHY_LANE_B;
+		else if (mdwc->in_host_mode)
+			mdwc->ss_phy->flags |= PHY_LANE_A;
 		usb_phy_set_suspend(mdwc->ss_phy, 0);
 		mdwc->ss_phy->flags &= ~DEVICE_IN_SS_MODE;
 		mdwc->lpm_flags &= ~MDWC3_SS_PHY_SUSPEND;
@@ -3027,16 +3064,27 @@ static void dwc3_resume_work(struct work_struct *w)
 		ret = extcon_get_property(edev, extcon_id,
 				EXTCON_PROP_USB_SS, &val);
 
-		if (!ret && val.intval == 0)
+		if (!ret && val.intval == 0 && extcon_id != EXTCON_USB_HOST)
 			dwc->maximum_speed = USB_SPEED_HIGH;
 
 		ret = extcon_get_property(edev, extcon_id,
 				EXTCON_PROP_USB_TYPEC_POLARITY, &val);
-		if (ret)
-			mdwc->typec_orientation = ORIENTATION_NONE;
-		else
-			mdwc->typec_orientation = val.intval ?
-					ORIENTATION_CC2 : ORIENTATION_CC1;
+		if (ret) {
+			mdwc->typec_orientation =
+				dwc3_msm_get_typec_orientation(mdwc);
+		} else {
+			enum plug_orientation psy_orient =
+				dwc3_msm_get_typec_orientation(mdwc);
+			if (psy_orient != ORIENTATION_NONE)
+				mdwc->typec_orientation = psy_orient;
+			else
+				mdwc->typec_orientation = val.intval ?
+						ORIENTATION_CC2 : ORIENTATION_CC1;
+		}
+
+		if (mdwc->typec_orientation == ORIENTATION_NONE)
+			mdwc->typec_orientation =
+				dwc3_msm_get_typec_orientation(mdwc);
 
 		dbg_event(0xFF, "cc_state", mdwc->typec_orientation);
 
@@ -3046,6 +3094,10 @@ static void dwc3_resume_work(struct work_struct *w)
 			dwc->gadget.is_selfpowered = val.intval;
 		else
 			dwc->gadget.is_selfpowered = 0;
+	} else if (mdwc->id_state == DWC3_ID_GROUND) {
+		if (mdwc->typec_orientation == ORIENTATION_NONE)
+			mdwc->typec_orientation =
+				dwc3_msm_get_typec_orientation(mdwc);
 	}
 
 skip_update:
@@ -3499,10 +3551,19 @@ static ssize_t orientation_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct dwc3_msm *mdwc = dev_get_drvdata(dev);
+	enum plug_orientation orient = mdwc->typec_orientation;
 
 	if (mdwc->orientation_override == PHY_LANE_A)
 		return scnprintf(buf, PAGE_SIZE, "A\n");
 	if (mdwc->orientation_override == PHY_LANE_B)
+		return scnprintf(buf, PAGE_SIZE, "B\n");
+
+	if (orient == ORIENTATION_NONE)
+		orient = dwc3_msm_get_typec_orientation(mdwc);
+
+	if (orient == ORIENTATION_CC1)
+		return scnprintf(buf, PAGE_SIZE, "A\n");
+	if (orient == ORIENTATION_CC2)
 		return scnprintf(buf, PAGE_SIZE, "B\n");
 
 	return scnprintf(buf, PAGE_SIZE, "none\n");

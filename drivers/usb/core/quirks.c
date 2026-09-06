@@ -436,6 +436,12 @@ static const struct usb_device_id usb_quirk_list[] = {
 	{ USB_DEVICE(0x0b05, 0x17e0), .driver_info =
 			USB_QUIRK_IGNORE_REMOTE_WAKEUP },
 
+	/* ASIX AX88179 / AX88179A / AX88178A Gigabit Ethernet */
+	{ USB_DEVICE(0x0b95, 0x1790), .driver_info =
+			USB_QUIRK_NO_LPM | USB_QUIRK_DELAY_INIT },
+	{ USB_DEVICE(0x0b95, 0x178a), .driver_info =
+			USB_QUIRK_NO_LPM | USB_QUIRK_DELAY_INIT },
+
 	/* Realtek Semiconductor Corp. Mass Storage Device (Multicard Reader)*/
 	{ USB_DEVICE(0x0bda, 0x0151), .driver_info = USB_QUIRK_CONFIG_INTF_STRINGS },
 
