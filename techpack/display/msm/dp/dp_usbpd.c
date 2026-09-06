@@ -174,13 +174,23 @@ static u32 dp_usbpd_gen_config_pkt(struct dp_usbpd_private *pd)
 	else
 		pin_cfg = pd->cap.dlink_pin_config;
 
-	for (pin = DP_USBPD_PIN_A; pin < DP_USBPD_PIN_MAX; pin++) {
-		if (pin_cfg & BIT(pin)) {
-			if (pd->dp_usbpd.base.multi_func) {
-				if (pin == DP_USBPD_PIN_D)
+	/*
+	 * If the connected device supports USB communication (e.g. multi-function
+	 * USB hub/dock) and Pin Assignment D (concurrent 2-lane DP + USB 3.0) is
+	 * supported, ALWAYS select Pin D so that USB 3.0 SuperSpeed is preserved.
+	 */
+	if (pd->dp_usbpd.base.peer_usb_comm && (pin_cfg & BIT(DP_USBPD_PIN_D))) {
+		pin = DP_USBPD_PIN_D;
+		pd->dp_usbpd.base.multi_func = true;
+	} else {
+		for (pin = DP_USBPD_PIN_A; pin < DP_USBPD_PIN_MAX; pin++) {
+			if (pin_cfg & BIT(pin)) {
+				if (pd->dp_usbpd.base.multi_func) {
+					if (pin == DP_USBPD_PIN_D)
+						break;
+				} else {
 					break;
-			} else {
-				break;
+				}
 			}
 		}
 	}
@@ -261,6 +271,8 @@ static void dp_usbpd_disconnect_cb(struct usbpd_svid_handler *hdlr)
 		return;
 	}
 
+	usbpd_return_ss_lane(pd->pd, USB_C_DP_SID);
+
 	pd->alt_mode = DP_USBPD_ALT_MODE_NONE;
 	pd->dp_usbpd.base.alt_mode_cfg_done = false;
 	DP_DEBUG("\n");
@@ -313,6 +325,14 @@ static int dp_usbpd_get_ss_lanes(struct dp_usbpd_private *pd)
 {
 	int rc = 0;
 	int timeout = 250;
+
+	/*
+	 * If peer has USB communication (USB hub/dock) or if no external
+	 * display is connected (hpd_high is false), DO NOT steal SuperSpeed
+	 * lanes from USB!
+	 */
+	if (pd->dp_usbpd.base.peer_usb_comm || !pd->dp_usbpd.base.hpd_high)
+		return 0;
 
 	/*
 	 * By default, USB reserves two lanes for Super Speed.
@@ -379,6 +399,9 @@ static void dp_usbpd_response_cb(struct usbpd_svid_handler *hdlr, u8 cmd,
 		pd->vdo = *vdos;
 		dp_usbpd_get_status(pd);
 
+		if (!pd->dp_usbpd.base.hpd_high)
+			usbpd_return_ss_lane(pd->pd, USB_C_DP_SID);
+
 		if (!pd->dp_usbpd.base.alt_mode_cfg_done) {
 			if (pd->dp_usbpd.port & BIT(1))
 				dp_usbpd_send_event(pd, DP_USBPD_EVT_CONFIGURE);
@@ -392,6 +415,9 @@ static void dp_usbpd_response_cb(struct usbpd_svid_handler *hdlr, u8 cmd,
 	case DP_USBPD_VDM_STATUS:
 		pd->vdo = *vdos;
 		dp_usbpd_get_status(pd);
+
+		if (!pd->dp_usbpd.base.hpd_high)
+			usbpd_return_ss_lane(pd->pd, USB_C_DP_SID);
 
 		if (!(pd->alt_mode & DP_USBPD_ALT_MODE_CONFIGURE)) {
 			pd->alt_mode |= DP_USBPD_ALT_MODE_STATUS;
@@ -479,6 +505,20 @@ error:
 	return rc;
 }
 
+static void dp_usbpd_return_ss_lane(struct dp_hpd *dp_hpd)
+{
+	struct dp_usbpd *dp_usbpd;
+	struct dp_usbpd_private *pd;
+
+	if (!dp_hpd)
+		return;
+
+	dp_usbpd = container_of(dp_hpd, struct dp_usbpd, base);
+	pd = container_of(dp_usbpd, struct dp_usbpd_private, dp_usbpd);
+
+	usbpd_return_ss_lane(pd->pd, USB_C_DP_SID);
+}
+
 int dp_usbpd_register(struct dp_hpd *dp_hpd)
 {
 	struct dp_usbpd *dp_usbpd;
@@ -559,6 +599,7 @@ struct dp_hpd *dp_usbpd_get(struct device *dev, struct dp_hpd_cb *cb)
 	dp_usbpd->base.simulate_attention = dp_usbpd_simulate_attention;
 	dp_usbpd->base.register_hpd = dp_usbpd_register;
 	dp_usbpd->base.wakeup_phy = dp_usbpd_wakeup_phy;
+	dp_usbpd->base.return_ss_lane = dp_usbpd_return_ss_lane;
 
 	return &dp_usbpd->base;
 error:

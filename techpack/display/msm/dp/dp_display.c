@@ -1243,6 +1243,9 @@ static int dp_display_handle_disconnect(struct dp_display_private *dp)
 
 	dp_display_host_unready(dp);
 
+	if (dp->hpd && dp->hpd->return_ss_lane)
+		dp->hpd->return_ss_lane(dp->hpd);
+
 	mutex_unlock(&dp->session_lock);
 
 	SDE_EVT32_EXTERNAL(SDE_EVTLOG_FUNC_EXIT, dp->state);

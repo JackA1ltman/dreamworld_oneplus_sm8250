@@ -722,6 +722,61 @@ err_exit:
 	return ret;
 }
 
+/**
+ * This API allows client driver to return SS lanes back to USB. It should
+ * not be called from atomic context.
+ *
+ * @pd - USBPD handler
+ * @svid - client's SVID
+ *
+ * @returns int - Success - 0, else negative error code
+ */
+int usbpd_return_ss_lane(struct usbpd *pd, u16 svid)
+{
+	int ret = 0;
+
+	if (!pd)
+		return -EINVAL;
+
+	usbpd_dbg(&pd->dev, "svid:%04x current ss_lane_svid:%04x\n",
+		  svid, pd->ss_lane_svid);
+
+	if (pd->ss_lane_svid != svid)
+		return 0;
+
+	pd->ss_lane_svid = 0;
+
+	if (pd->peer_usb_comm) {
+		stop_usb_host(pd);
+
+		/* blocks until USB host is completely stopped */
+		ret = extcon_blocking_sync(pd->extcon, EXTCON_USB_HOST,
+					   STOP_USB_HOST);
+		if (ret)
+			usbpd_err(&pd->dev, "err(%d) stopping host\n", ret);
+
+		/* Restart host with SuperSpeed enabled */
+		start_usb_host(pd, true);
+	}
+
+	/* Reset DP extcon to 2-lane mode if DP still has connection, else 0 */
+	ret = extcon_blocking_sync(pd->extcon, EXTCON_DISP_DP,
+				   pd->has_dp ? 2 : 0);
+	if (ret)
+		usbpd_err(&pd->dev, "err(%d) returning DP lanes\n", ret);
+
+	return ret;
+}
+EXPORT_SYMBOL(usbpd_return_ss_lane);
+
+static int usbpd_release_ss_lane_to_usb(struct usbpd *pd,
+					struct usbpd_svid_handler *hdlr)
+{
+	if (!hdlr || !pd)
+		return -EINVAL;
+	return usbpd_return_ss_lane(pd, hdlr->svid);
+}
+
 static int set_power_role(struct usbpd *pd, enum power_role pr)
 {
 	union power_supply_propval val = {0};
@@ -1404,6 +1459,7 @@ int usbpd_register_svid(struct usbpd *pd, struct usbpd_svid_handler *hdlr)
 	list_add_tail(&hdlr->entry, &pd->svid_handlers);
 	mutex_unlock(&pd->svid_handler_lock);
 	hdlr->request_usb_ss_lane = usbpd_release_ss_lane;
+	hdlr->release_usb_ss_lane = usbpd_release_ss_lane_to_usb;
 
 	/* already connected with this SVID discovered? */
 	if (pd->vdm_state >= DISCOVERED_SVIDS) {
