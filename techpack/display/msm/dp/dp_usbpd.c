@@ -175,11 +175,13 @@ static u32 dp_usbpd_gen_config_pkt(struct dp_usbpd_private *pd)
 		pin_cfg = pd->cap.dlink_pin_config;
 
 	/*
-	 * If the connected device supports USB communication (e.g. multi-function
-	 * USB hub/dock) and Pin Assignment D (concurrent 2-lane DP + USB 3.0) is
-	 * supported, ALWAYS select Pin D so that USB 3.0 SuperSpeed is preserved.
+	 * If the connected device supports Pin Assignment D (concurrent 2-lane DP +
+	 * 2-lane USB 3.0), ALWAYS select Pin D so that USB 3.0 SuperSpeed is preserved!
+	 * Do NOT check peer_usb_comm here, because when an external PD charger is
+	 * plugged into a pass-through Hub, the charger's PDO sets USB_COMM = 0,
+	 * causing peer_usb_comm to be false.
 	 */
-	if (pd->dp_usbpd.base.peer_usb_comm && (pin_cfg & BIT(DP_USBPD_PIN_D))) {
+	if (pin_cfg & BIT(DP_USBPD_PIN_D)) {
 		pin = DP_USBPD_PIN_D;
 		pd->dp_usbpd.base.multi_func = true;
 	} else {
@@ -327,11 +329,10 @@ static int dp_usbpd_get_ss_lanes(struct dp_usbpd_private *pd)
 	int timeout = 250;
 
 	/*
-	 * If peer has USB communication (USB hub/dock) or if no external
-	 * display is connected (hpd_high is false), DO NOT steal SuperSpeed
-	 * lanes from USB!
+	 * Do not steal SuperSpeed lanes from USB when multi_func (Pin D)
+	 * is active or when no external display is connected (hpd_high is false)!
 	 */
-	if (pd->dp_usbpd.base.peer_usb_comm || !pd->dp_usbpd.base.hpd_high)
+	if (pd->dp_usbpd.base.multi_func || !pd->dp_usbpd.base.hpd_high)
 		return 0;
 
 	/*

@@ -706,7 +706,7 @@ static int usbpd_release_ss_lane(struct usbpd *pd,
 		goto err_exit;
 	}
 
-	if (pd->peer_usb_comm)
+	if (pd->current_dr == DR_DFP || extcon_get_state(pd->extcon, EXTCON_USB_HOST))
 		start_usb_host(pd, false);
 
 	pd->ss_lane_svid = hdlr->svid;
@@ -746,7 +746,12 @@ int usbpd_return_ss_lane(struct usbpd *pd, u16 svid)
 
 	pd->ss_lane_svid = 0;
 
-	if (pd->peer_usb_comm) {
+	/*
+	 * If we are in USB Host mode (or DFP), always restart USB host with
+	 * SuperSpeed enabled. Do NOT depend on peer_usb_comm because an external
+	 * PD charger plugged into a multi-function hub will set peer_usb_comm = false.
+	 */
+	if (pd->current_dr == DR_DFP || extcon_get_state(pd->extcon, EXTCON_USB_HOST)) {
 		stop_usb_host(pd);
 
 		/* blocks until USB host is completely stopped */
@@ -2095,8 +2100,7 @@ static void dr_swap(struct usbpd *pd)
 		pd_phy_update_roles(pd->current_dr, pd->current_pr);
 
 		stop_usb_peripheral(pd);
-		if (pd->peer_usb_comm)
-			start_usb_host(pd, true);
+		start_usb_host(pd, true);
 
 		typec_set_data_role(pd->typec_port, TYPEC_HOST);
 
