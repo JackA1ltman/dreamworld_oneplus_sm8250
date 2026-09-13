@@ -681,6 +681,8 @@ static int msm_ssphy_qmp_set_suspend(struct usb_phy *uphy, int suspend)
 	if (phy->in_suspend == suspend) {
 		dev_dbg(uphy->dev, "%s: USB PHY is already %s.\n",
 			__func__, (suspend ? "suspended" : "resumed"));
+		if (!suspend)
+			usb_qmp_update_portselect_phymode(phy);
 		return 0;
 	}
 
@@ -706,6 +708,7 @@ static int msm_ssphy_qmp_set_suspend(struct usb_phy *uphy, int suspend)
 	} else {
 		msm_ssphy_power_enable(phy, 1);
 		msm_ssphy_qmp_enable_clks(phy, true);
+		usb_qmp_update_portselect_phymode(phy);
 		if (!phy->cable_connected) {
 			writel_relaxed(0x01,
 			phy->base + phy->phy_reg[USB3_PHY_POWER_DOWN_CONTROL]);

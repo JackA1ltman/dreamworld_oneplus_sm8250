@@ -72,6 +72,7 @@ struct dp_hpd {
 	int (*simulate_connect)(struct dp_hpd *dp_hpd, bool hpd);
 	int (*simulate_attention)(struct dp_hpd *dp_hpd, int vdo);
 	void (*wakeup_phy)(struct dp_hpd *dp_hpd, bool wakeup);
+	void (*return_ss_lane)(struct dp_hpd *dp_hpd);
 };
 
 /**

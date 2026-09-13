@@ -868,7 +868,7 @@ static void dp_display_host_init(struct dp_display_private *dp)
 		flip = true;
 
 	reset = dp->debug->sim_mode ? false :
-		(!dp->hpd->multi_func || !dp->hpd->peer_usb_comm);
+		(!dp->hpd->multi_func && dp->hpd->hpd_high && !dp->hpd->peer_usb_comm);
 
 	dp->power->init(dp->power, flip);
 	dp->hpd->host_init(dp->hpd, &dp->catalog->hpd);
@@ -1242,6 +1242,9 @@ static int dp_display_handle_disconnect(struct dp_display_private *dp)
 		dp_display_clean(dp);
 
 	dp_display_host_unready(dp);
+
+	if (dp->hpd && dp->hpd->return_ss_lane)
+		dp->hpd->return_ss_lane(dp->hpd);
 
 	mutex_unlock(&dp->session_lock);
 

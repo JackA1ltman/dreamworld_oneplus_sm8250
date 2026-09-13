@@ -26,9 +26,9 @@ DTB_LIST := $(addsuffix .dtb,$(DTB_NAMES))
 else
 DTB_LIST := $(dtb-y)
 endif
-DTB_OBJS := $(shell find $(obj)/dts/ -name \*.dtb)
+DTB_OBJS := $(obj)/dts/vendor/oplus/kona.dtb $(obj)/dts/vendor/oplus/kona-v2.dtb $(obj)/dts/vendor/oplus/kona-v2.1.dtb
 
-DTBO_OBJS := $(shell find $(obj)/dts/ -name \*.dtbo)
+DTBO_OBJS := $(obj)/dts/vendor/oplus/kona-instantnoodle-overlay.dtbo $(obj)/dts/vendor/oplus/kona-lemonades-overlay.dtbo $(obj)/dts/vendor/oplus/kona-kebab-overlay.dtbo $(obj)/dts/vendor/oplus/kona-instantnoodlep-overlay.dtbo
 
 # Add RTIC DTB to the DTB list if RTIC MPGen is enabled
 # Note, we keep this for compatibility with

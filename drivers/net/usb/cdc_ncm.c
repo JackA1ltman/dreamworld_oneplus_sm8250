@@ -1048,6 +1048,12 @@ EXPORT_SYMBOL_GPL(cdc_ncm_select_altsetting);
 
 static int cdc_ncm_bind(struct usbnet *dev, struct usb_interface *intf)
 {
+	/* ASIX AX88179 / AX88179A is handled by ax_usb_nic */
+	if (le16_to_cpu(dev->udev->descriptor.idVendor) == 0x0b95 &&
+	    (le16_to_cpu(dev->udev->descriptor.idProduct) == 0x1790 ||
+	     le16_to_cpu(dev->udev->descriptor.idProduct) == 0x178a))
+		return -ENODEV;
+
 	/* MBIM backwards compatible function? */
 	if (cdc_ncm_select_altsetting(intf) != CDC_NCM_COMM_ALTSETTING_NCM)
 		return -ENODEV;
