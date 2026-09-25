@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# ZXC compression library (kernel port of upstream 0.14.0).
+# ZXC compression library (kernel port of upstream 0.14.1).
 #
 # Global flags:
 #   -DZXC_STATIC_DEFINE      No shared-library export attributes.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * zram backend using the ZXC compression library (lib/zxc, upstream 0.14.0).
+ * zram backend using the ZXC compression library (lib/zxc, upstream 0.14.1).
  *
  * Uses the ZXC "static context" API: the per-CPU context is a caller-owned,
  * vmalloc'd workspace pinned to one block size (PAGE_SIZE) and level, so the
