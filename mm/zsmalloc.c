@@ -37,7 +37,6 @@
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/highmem.h>
-#include <linux/scatterlist.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <asm/tlbflush.h>
@@ -414,24 +413,6 @@ static void zs_zpool_free(void *pool, unsigned long handle)
 	zs_free(pool, handle);
 }
 
-static void *zs_zpool_obj_read_begin(void *pool, unsigned long handle,
-				     void *local_copy)
-{
-	return zs_obj_read_begin(pool, handle, local_copy);
-}
-
-static void zs_zpool_obj_read_end(void *pool, unsigned long handle,
-				  void *handle_mem)
-{
-	zs_obj_read_end(pool, handle, handle_mem);
-}
-
-static void zs_zpool_obj_write(void *pool, unsigned long handle,
-			       void *handle_mem, size_t mem_len)
-{
-	zs_obj_write(pool, handle, handle_mem, mem_len);
-}
-
 static void *zs_zpool_map(void *pool, unsigned long handle,
 			enum zpool_mapmode mm)
 {
@@ -470,9 +451,6 @@ static struct zpool_driver zs_zpool_driver = {
 	.malloc_support_movable = true,
 	.malloc =	zs_zpool_malloc,
 	.free =		zs_zpool_free,
-	.obj_read_begin = zs_zpool_obj_read_begin,
-	.obj_read_end =	zs_zpool_obj_read_end,
-	.obj_write =	zs_zpool_obj_write,
 	.map =		zs_zpool_map,
 	.unmap =	zs_zpool_unmap,
 	.total_size =	zs_zpool_total_size,
@@ -1440,100 +1418,6 @@ void zs_unmap_object(struct zs_pool *pool, unsigned long handle)
 }
 EXPORT_SYMBOL_GPL(zs_unmap_object);
 
-void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
-			void *local_copy)
-{
-	/*
-	 * Keep the legacy helper available for older callers. The modern
-	 * mapping path already provides a stable readable view of the object,
-	 * so @local_copy is only kept for API compatibility.
-	 */
-	(void)local_copy;
-
-	return zs_map_object(pool, handle, ZS_MM_RO);
-}
-EXPORT_SYMBOL_GPL(zs_obj_read_begin);
-
-void zs_obj_read_end(struct zs_pool *pool, unsigned long handle,
-		     void *handle_mem)
-{
-	(void)handle_mem;
-	zs_unmap_object(pool, handle);
-}
-EXPORT_SYMBOL_GPL(zs_obj_read_end);
-
-void zs_obj_read_sg_begin(struct zs_pool *pool, unsigned long handle,
-			  struct scatterlist *sg, size_t mem_len)
-{
-	struct zspage *zspage;
-	struct page *page;
-	unsigned long obj, off;
-	unsigned int obj_idx;
-	unsigned int class_idx;
-	enum fullness_group fg;
-	struct size_class *class;
-
-	obj = handle_to_obj(handle);
-	obj_to_location(obj, &page, &obj_idx);
-	zspage = get_zspage(page);
-
-	/*
-	 * Match the regular mapping path: pin the handle first, then hold the
-	 * zspage stable across the caller's direct scatterlist read.
-	 */
-	pin_tag(handle);
-	migrate_read_lock(zspage);
-
-	get_zspage_mapping(zspage, &class_idx, &fg);
-	class = pool->size_class[class_idx];
-	off = (class->size * obj_idx) & ~PAGE_MASK;
-
-	if (likely(!PageHugeObject(page)))
-		off += ZS_HANDLE_SIZE;
-
-	if (off + mem_len <= PAGE_SIZE) {
-		sg_init_table(sg, 1);
-		sg_set_page(sg, page, mem_len, off);
-		return;
-	}
-
-	sg_init_table(sg, 2);
-	sg_set_page(sg, page, PAGE_SIZE - off, off);
-	page = get_next_page(page);
-	BUG_ON(!page);
-	sg = sg_next(sg);
-	sg_set_page(sg, page, mem_len - (PAGE_SIZE - off), 0);
-}
-EXPORT_SYMBOL_GPL(zs_obj_read_sg_begin);
-
-void zs_obj_read_sg_end(struct zs_pool *pool, unsigned long handle)
-{
-	struct zspage *zspage;
-	struct page *page;
-	unsigned long obj;
-	unsigned int obj_idx;
-
-	(void)pool;
-
-	obj = handle_to_obj(handle);
-	obj_to_location(obj, &page, &obj_idx);
-	zspage = get_zspage(page);
-
-	migrate_read_unlock(zspage);
-	unpin_tag(handle);
-}
-EXPORT_SYMBOL_GPL(zs_obj_read_sg_end);
-
-void zs_obj_write(struct zs_pool *pool, unsigned long handle,
-		  void *handle_mem, size_t mem_len)
-{
-	void *dst;
-
-	dst = zs_map_object(pool, handle, ZS_MM_RW);
-	memcpy(dst, handle_mem, mem_len);
-	zs_unmap_object(pool, handle);
-}
-EXPORT_SYMBOL_GPL(zs_obj_write);
 
 /**
  * zs_huge_class_size() - Returns the size (in bytes) of the first huge

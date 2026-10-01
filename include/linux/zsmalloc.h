@@ -40,7 +40,6 @@ struct zs_pool_stats {
 };
 
 struct zs_pool;
-struct scatterlist;
 
 struct zs_pool *zs_create_pool(const char *name);
 void zs_destroy_pool(struct zs_pool *pool);
@@ -54,20 +53,6 @@ size_t zs_huge_class_size(struct zs_pool *pool);
 void *zs_map_object(struct zs_pool *pool, unsigned long handle,
 			enum zs_mapmode mm);
 void zs_unmap_object(struct zs_pool *pool, unsigned long handle);
-
-/*
- * Legacy copy-style helpers kept for older zsmalloc/zram callers.
- * New code should prefer zs_map_object()/zs_unmap_object().
- */
-void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
-			void *local_copy);
-void zs_obj_read_end(struct zs_pool *pool, unsigned long handle,
-		     void *handle_mem);
-void zs_obj_read_sg_begin(struct zs_pool *pool, unsigned long handle,
-			  struct scatterlist *sg, size_t mem_len);
-void zs_obj_read_sg_end(struct zs_pool *pool, unsigned long handle);
-void zs_obj_write(struct zs_pool *pool, unsigned long handle,
-		  void *handle_mem, size_t mem_len);
 
 unsigned long zs_get_total_pages(struct zs_pool *pool);
 unsigned long zs_compact(struct zs_pool *pool);
