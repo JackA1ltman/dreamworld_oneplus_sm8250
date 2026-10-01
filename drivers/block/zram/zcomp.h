@@ -62,7 +62,7 @@ struct zcomp {
 
 int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node);
 int zcomp_cpu_dead(unsigned int cpu, struct hlist_node *node);
-ssize_t zcomp_available_show(const char *comp, char *buf);
+ssize_t zcomp_available_show(const char *comp, char *buf, size_t sz);
 bool zcomp_available_algorithm(const char *comp);
 
 struct zcomp *__zcomp_create(const char *comp,

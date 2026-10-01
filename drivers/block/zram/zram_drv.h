@@ -30,6 +30,25 @@
 #define ZRAM_SECTOR_PER_LOGICAL_BLOCK	\
 	(1 << (ZRAM_LOGICAL_BLOCK_SHIFT - SECTOR_SHIFT))
 
+/*
+ * BACKPORT (v6.2): multiple compression streams.  A zram device may hold
+ * up to ZRAM_MAX_COMPS algorithms; slot 0 is the primary (used on the
+ * write path), higher slots recompress (opt-in) idle or huge pages into
+ * a smaller form.
+ */
+#ifdef CONFIG_ZRAM_MULTI_COMP
+#define ZRAM_PRIMARY_COMP	0
+#define ZRAM_SECONDARY_COMP	1
+#define ZRAM_MAX_COMPS		4
+#else
+#define ZRAM_PRIMARY_COMP	0
+#define ZRAM_SECONDARY_COMP	0
+#define ZRAM_MAX_COMPS		1
+#endif
+
+/* Only 2 bits are allowed for comp priority index */
+#define ZRAM_COMP_PRIORITY_MASK	0x3
+
 
 /*
  * The lower ZRAM_FLAG_SHIFT bits of table.flags is for
@@ -52,6 +71,16 @@ enum zram_pageflags {
 	ZRAM_UNDER_WB,	/* page is under writeback */
 	ZRAM_HUGE,	/* Incompressible page */
 	ZRAM_IDLE,	/* not accessed page since last idle marking */
+
+	ZRAM_INCOMPRESSIBLE, /* none of the algorithms could compress it */
+
+	/*
+	 * BACKPORT (v6.2): 2-bit comp priority index.  Kept at the tail of
+	 * the enum so the bit layout stays stable; flags is an unsigned long,
+	 * so these bits sit above bit 30.
+	 */
+	ZRAM_COMP_PRIORITY_BIT1, /* First bit of comp priority index */
+	ZRAM_COMP_PRIORITY_BIT2, /* Second bit of comp priority index */
 
 	__NR_ZRAM_PAGEFLAGS,
 };
@@ -112,7 +141,8 @@ struct zram_hash {
 struct zram {
 	struct zram_table_entry *table;
 	struct zs_pool *mem_pool;
-	struct zcomp *comp;
+	struct zcomp *comps[ZRAM_MAX_COMPS];
+	u32 num_active_comps;
 	struct gendisk *disk;
 	struct zram_hash *hash;
 	size_t hash_size;
@@ -129,7 +159,7 @@ struct zram {
 	 * we can store in a disk.
 	 */
 	u64 disksize;	/* bytes */
-	char compressor[CRYPTO_MAX_ALG_NAME];
+	char comp_algs[ZRAM_MAX_COMPS][CRYPTO_MAX_ALG_NAME];
 	/*
 	 * zram is claimed so open request will be failed
 	 */

@@ -174,6 +174,11 @@ debug_stat        	RO	this file is used for zram debugging purposes
 backing_dev	  	RW	set up backend storage for zram to write out
 idle		  	WO	mark allocated slot as idle
 use_dedup		RW	show and set deduplication feature
+recomp_algorithm	RW	show and set secondary compression algorithms
+				(CONFIG_ZRAM_MULTI_COMP)
+recompress		WO	trigger recompression of idle or incompressible
+				pages with a secondary algorithm
+				(CONFIG_ZRAM_MULTI_COMP)
 
 User space is advised to use the following files to read the device statistics.
 
@@ -327,6 +332,55 @@ budget in next setting is user's job.
 
 If admin want to measure writeback count in a certain period, he could
 know it via /sys/block/zram0/bd_stat's 3rd column.
+
+= recompression
+
+With CONFIG_ZRAM_MULTI_COMP, a zram device can be configured with up
+to three secondary compression algorithms in addition to the primary
+one that is used on the write path.  The secondary algorithms are
+applied to selected objects afterwards (recompression), trading a
+little CPU for a better compression ratio.
+
+The secondary algorithms must be assigned before the device is
+initialised (i.e. before disksize is set):
+
+	# show available algorithms and current assignment
+	cat /sys/block/zram0/recomp_algorithm
+	#1:
+	#2:
+	#3:
+
+	# assign zstd as secondary algorithm #1
+	echo "algo=zstd priority=1" > /sys/block/zram0/recomp_algorithm
+
+	# assign deflate as secondary algorithm #2
+	echo "algo=deflate priority=2" > /sys/block/zram0/recomp_algorithm
+
+Recompression is then requested via the recompress attribute, which
+scans the device and re-compresses matching objects with the
+configured secondary algorithm(s):
+
+	# mark pages as idle, then recompress them
+	echo all > /sys/block/zram0/idle
+	echo "type=idle" > /sys/block/zram0/recompress
+
+	# recompress incompressible (huge) pages, but only those that
+	# are still larger than 3000 bytes
+	echo "type=huge threshold=3000" > /sys/block/zram0/recompress
+
+	# recompress idle pages using only the algorithm assigned to
+	# priority 1, skipping objects already compressed below 2048
+	# bytes
+	echo "type=idle threshold=2048 priority=1" > \
+		/sys/block/zram0/recompress
+
+A secondary algorithm replaces an object only if that results in a
+smaller zsmalloc size class, so recompression never grows the pool.
+Objects that none of the secondary algorithms can shrink are marked
+incompressible and are skipped by subsequent recompression runs.
+
+Note: slots managed by the deduplication feature (CONFIG_ZRAM_DEDUP)
+are never recompressed.
 
 = memory tracking
 

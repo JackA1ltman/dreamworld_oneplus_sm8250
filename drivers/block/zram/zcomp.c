@@ -98,9 +98,8 @@ bool zcomp_available_algorithm(const char *comp)
 	return lookup_backend_ops(comp) != NULL;
 }
 
-ssize_t zcomp_available_show(const char *comp, char *buf)
+ssize_t zcomp_available_show(const char *comp, char *buf, size_t sz)
 {
-	ssize_t sz = 0;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(backends) - 1; i++) {

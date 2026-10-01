@@ -147,3 +147,74 @@ Description:
 		managed by reference count and will not be stored in memory
 		twice. Benefit of this feature largely depends on the workload
 		so keep attention when use.
+
+What:		/sys/block/zram<id>/recomp_algorithm
+Date:		February 2023 (mainline v6.2, backported)
+Contact:	Sergey Senozhatsky <gld1_53_tKcwEcIK7asWa8HY43SE1wI5j6a2yN1HRRCkR4Ehsb2EqiVx1k>
+Description:
+		The recomp_algorithm file is read-write and is available
+		when the kernel is configured with CONFIG_ZRAM_MULTI_COMP.
+		It configures secondary compression algorithms for the
+		device, which are used by the recompression (see the
+		recompress attribute).
+
+		Reads return the list of available compression algorithms,
+		with the currently assigned one shown in square brackets,
+		for every configured secondary algorithm (numbered from 1
+		to 3).  For instance:
+
+			cat /sys/block/zram0/recomp_algorithm
+			#1: lzo lz4 [zstd] deflate
+			#2:
+			#3:
+
+		Write input may contain optional algorithm= and priority=
+		parameters:
+
+			# assign zstd as secondary algorithm #1
+			echo "algo=zstd priority=1" > /sys/block/zram0/recomp_algorithm
+
+		The device must not be initialised yet (write returns
+		-EBUSY otherwise).
+
+What:		/sys/block/zram<id>/recompress
+Date:		February 2023 (mainline v6.2, backported)
+Contact:	Sergey Senozhatsky <gld1_53_tKcwEcIK7asWa8HY43SE1wI5j6a2yN1HRRCkR4Ehsb2EqiVx1k>
+Description:
+		The recompress file is write-only and is available when the
+		kernel is configured with CONFIG_ZRAM_MULTI_COMP.  It
+		triggers recompression of a subset of stored objects using
+		one of the secondary compression algorithms configured via
+		the recomp_algorithm attribute.
+
+		Write input may contain the following parameters:
+
+		    type=   select the type of objects to recompress:
+			    idle (marked idle), huge (incompressible),
+			    huge_idle (both).  An unknown type value is
+			    rejected with -EINVAL.
+		    threshold=  do not recompress objects that are
+			    already compressed to a size (in bytes) less
+			    than this threshold.
+		    algo=    recompress using the secondary algorithm
+			    with the given name.
+		    priority=  recompress using the secondary algorithm
+			    with the given priority (index).
+
+		Examples:
+
+			# mark all objects as idle
+			echo all > /sys/block/zram0/idle
+
+			# recompress all idle objects smaller than
+			# PAGE_SIZE/2 with the algorithm assigned to
+			# priority 1
+			echo "type=idle threshold=2048 priority=1" > \
+				/sys/block/zram0/recompress
+
+		A secondary algorithm recompresses an object only if it
+		results in a smaller zsmalloc size class; otherwise the
+		object keeps its previous compression.  Objects that none
+		of the secondary algorithms can shrink are marked
+		incompressible and skipped by subsequent recompression
+		runs.
