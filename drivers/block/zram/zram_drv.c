@@ -1230,7 +1230,7 @@ static struct zram_entry *zram_entry_alloc(struct zram *zram,
 	unsigned long handle;
 
 	handle = zs_malloc(zram->mem_pool, len, flags);
-	if (!handle)
+	if (IS_ERR_VALUE(handle))
 		return NULL;
 
 	if (!zram_dedup_enabled(zram))
