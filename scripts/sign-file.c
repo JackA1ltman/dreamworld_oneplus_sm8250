@@ -27,14 +27,12 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
-#include <openssl/engine.h>
 
 /*
- * OpenSSL 3.0 deprecates the OpenSSL's ENGINE API.
- *
- * Remove this if/when that API is no longer used
+ * The OpenSSL ENGINE API was removed in OpenSSL 4.0.  PKCS#11 based
+ * key loading is therefore no longer supported here; keys must be
+ * supplied as PEM/DER files.
  */
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 /*
  * Use CMS if we have openssl-1.0.0 or newer available - otherwise we have to
@@ -85,31 +83,18 @@ void format(void)
 
 static void display_openssl_errors(int l)
 {
-	const char *file;
 	char buf[120];
-	int e, line;
+	unsigned long e;
 
 	if (ERR_peek_error() == 0)
 		return;
 	fprintf(stderr, "At main.c:%d:\n", l);
 
-	while ((e = ERR_get_error_line(&file, &line))) {
-		ERR_error_string(e, buf);
-		fprintf(stderr, "- SSL %s: %s:%d\n", buf, file, line);
+	while ((e = ERR_get_error())) {
+		ERR_error_string_n(e, buf, sizeof(buf));
+		fprintf(stderr, "- SSL %s\n", buf);
 	}
 }
-
-#ifndef OPENSSL_NO_ENGINE
-static void drain_openssl_errors(void)
-{
-	const char *file;
-	int line;
-
-	if (ERR_peek_error() == 0)
-		return;
-	while (ERR_get_error_line(&file, &line)) {}
-}
-#endif
 
 #define ERR(cond, fmt, ...)				\
 	do {						\
@@ -145,28 +130,6 @@ static EVP_PKEY *read_private_key(const char *private_key_name)
 {
 	EVP_PKEY *private_key;
 	BIO *b;
-
-#ifndef OPENSSL_NO_ENGINE
-	if (!strncmp(private_key_name, "pkcs11:", 7)) {
-		ENGINE *e;
-
-		ENGINE_load_builtin_engines();
-		drain_openssl_errors();
-		e = ENGINE_by_id("pkcs11");
-		ERR(!e, "Load PKCS#11 ENGINE");
-		if (ENGINE_init(e))
-			drain_openssl_errors();
-		else
-			ERR(1, "ENGINE_init");
-		if (key_pass)
-			ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0),
-			    "Set PKCS#11 PIN");
-		private_key = ENGINE_load_private_key(e, private_key_name,
-						      NULL, NULL);
-		ERR(!private_key, "%s", private_key_name);
-		return private_key;
-	}
-#endif
 
 	b = BIO_new_file(private_key_name, "rb");
 	ERR(!b, "%s", private_key_name);
