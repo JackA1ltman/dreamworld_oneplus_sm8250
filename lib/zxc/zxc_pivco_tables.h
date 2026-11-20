@@ -1,8 +1,8 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * ZXC - High-performance lossless compression
  *
- * Copyright (c) 2025-2026 Bertrand Lebonnois and contributors.
- * SPDX-License-Identifier: BSD-3-Clause
+ * Copyright (c) Bertrand Lebonnois and contributors.
  */
 
 /**
@@ -32,6 +32,7 @@
 #ifndef ZXC_PIVCO_TABLES_H
 #define ZXC_PIVCO_TABLES_H
 
+/* backport for 4.19: use kernel types header instead of <stdint.h>. */
 #include <linux/types.h>
 
 // ELF/Mach-O visibility only: Windows PE/COFF targets (MinGW/MSYS2 GCC,

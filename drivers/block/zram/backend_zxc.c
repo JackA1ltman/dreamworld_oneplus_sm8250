@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * zram backend using the ZXC compression library (lib/zxc, upstream 0.14.1).
+ * zram backend using the ZXC compression library (lib/zxc, upstream 1.0.1).
  *
  * Uses the ZXC "static context" API: the per-CPU context is a caller-owned,
  * vmalloc'd workspace pinned to one block size (PAGE_SIZE) and level, so the
@@ -27,41 +27,20 @@ struct zxc_ctx {
 	int level;		/* pinned compression level */
 };
 
-struct zxc_drv {
-	zxc_compress_opts_t opts;
-};
-
 static void zxc_release_params(struct zcomp_params *params)
 {
-	kfree(params->drv_data);
 	params->drv_data = NULL;
 }
 
 static int zxc_setup_params(struct zcomp_params *params)
 {
-	struct zxc_drv *drv;
-
 	if (params->level == ZCOMP_PARAM_NO_LEVEL)
 		params->level = ZXC_LEVEL_DEFAULT;
 
 	if (params->level < ZXC_LEVEL_FASTEST || params->level > ZXC_LEVEL_ULTRA)
 		return -EINVAL;
 
-	drv = kzalloc(sizeof(*drv), GFP_KERNEL);
-	if (!drv)
-		return -ENOMEM;
-
-	/*
-	 * The static cctx pins level, block_size and checksum_enabled at init
-	 * time. block_size must be explicit: zxc_init_static_cctx treats 0 as
-	 * ZXC_BLOCK_SIZE_DEFAULT (512 KB), which would mismatch the PAGE_SIZE
-	 * blocks zram always passes.
-	 */
-	drv->opts.level = params->level;
-	drv->opts.block_size = PAGE_SIZE;
-	drv->opts.checksum_enabled = 0;
-	params->drv_data = drv;
-
+	params->drv_data = NULL;
 	return 0;
 }
 
@@ -83,7 +62,6 @@ static void zxc_destroy(struct zcomp_ctx *ctx)
 static int zxc_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
 {
 	struct zxc_ctx *zctx;
-	struct zxc_drv *drv = params->drv_data;
 	size_t cctx_sz, dctx_sz;
 
 	/* Dictionary compression is not supported by this backend. */
@@ -112,7 +90,13 @@ static int zxc_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
 	if (!zctx->dctx_mem)
 		goto error;
 
-	zctx->cctx = zxc_init_static_cctx(zctx->mem, cctx_sz, &drv->opts);
+	/*
+	 * block_size and level are pinned at init (checksum defaults to 0).
+	 * block_size must be explicit: zxc_init_static_cctx requires a valid
+	 * power of two matching PAGE_SIZE blocks zram always passes.
+	 */
+	zctx->cctx = zxc_init_static_cctx(zctx->mem, cctx_sz, PAGE_SIZE,
+					  params->level);
 	if (!zctx->cctx)
 		goto error;
 
@@ -133,9 +117,9 @@ static int zxc_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
 	struct zxc_ctx *zctx = ctx->context;
 	int64_t ret;
 
-	/* NULL opts: reuse the level/block_size/checksum pinned at init. */
+	/* Reuse the level, block_size and checksum state pinned at init. */
 	ret = zxc_compress_block(zctx->cctx, req->src, req->src_len, req->dst,
-				 req->dst_len, NULL);
+				 req->dst_len);
 	if (ret < 0)
 		return -EINVAL;
 	req->dst_len = (size_t)ret;
@@ -154,7 +138,7 @@ static int zxc_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
 	 * regular block decoder needs a tail pad we do not have here).
 	 */
 	ret = zxc_decompress_block_safe(zctx->dctx, req->src, req->src_len,
-					req->dst, req->dst_len, NULL);
+					req->dst, req->dst_len);
 	if (ret < 0 || ret != (int64_t)req->dst_len)
 		return -EINVAL;
 	return 0;

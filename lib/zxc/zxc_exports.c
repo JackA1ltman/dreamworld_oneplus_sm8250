@@ -24,9 +24,22 @@
 
 EXPORT_SYMBOL(zxc_create_cctx);
 EXPORT_SYMBOL(zxc_free_cctx);
+EXPORT_SYMBOL(zxc_cctx_set_param);
+EXPORT_SYMBOL(zxc_cctx_get_param);
+EXPORT_SYMBOL(zxc_cctx_reset);
+EXPORT_SYMBOL(zxc_cparam_bounds);
 EXPORT_SYMBOL(zxc_create_dctx);
 EXPORT_SYMBOL(zxc_free_dctx);
+EXPORT_SYMBOL(zxc_dctx_set_param);
+EXPORT_SYMBOL(zxc_dctx_get_param);
+EXPORT_SYMBOL(zxc_dctx_reset);
+EXPORT_SYMBOL(zxc_dparam_bounds);
+EXPORT_SYMBOL(zxc_static_cctx_workspace_size);
+EXPORT_SYMBOL(zxc_init_static_cctx);
+EXPORT_SYMBOL(zxc_static_dctx_workspace_size);
+EXPORT_SYMBOL(zxc_init_static_dctx);
 EXPORT_SYMBOL(zxc_compress_block);
+EXPORT_SYMBOL(zxc_decompress_block);
 EXPORT_SYMBOL(zxc_decompress_block_safe);
 
 /*

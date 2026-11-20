@@ -1,8 +1,8 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * ZXC - High-performance lossless compression
  *
- * Copyright (c) 2025-2026 Bertrand Lebonnois and contributors.
- * SPDX-License-Identifier: BSD-3-Clause
+ * Copyright (c) Bertrand Lebonnois and contributors.
  */
 
 /**
@@ -26,12 +26,15 @@
 #ifndef ZXC_INTERNAL_H
 #define ZXC_INTERNAL_H
 
-#include "zxc_deps.h" /* kernel deps: slab allocator macros, missing libc constants */
+#if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L)
+#error "libzxc requires C11 or later (MSVC: /std:c11)"
+#endif
 
-/* Linux-kernel build of the public API surface (constants, error codes, option
- * structs, block / context / static-context prototypes).  Upstream this was
- * zxc_buffer.h + zxc_constants.h + zxc_error.h + zxc_opts.h + zxc_seekable.h;
- * the seekable API is not ported to the kernel, so it is omitted here. */
+#include "zxc_deps.h" /* libc deps: <assert.h>, <limits.h>, <stdint.h>, <stdlib.h>, <string.h>,
+                        and the ZXC_MALLOC / ZXC_ALIGNED_MALLOC macros.
+                        Vendor this file to retarget non-libc environments. */
+
+/* backport for 4.19: use unified kernel public API header instead of userspace headers. */
 #include "../../include/linux/zxc.h"
 #include "rapidhash.h"
 
@@ -49,18 +52,20 @@ extern "C" {
  * @name Atomic Qualifier
  * @brief Provides a portable atomic / volatile qualifier.
  *
- * If C11 atomics are available, @c ZXC_ATOMIC expands to @c _Atomic;
- * otherwise it falls back to @c volatile.
+ * @c ZXC_ATOMIC expands to @c _Atomic, or to @c volatile where the compiler
+ * leaves out the optional C11 atomics (@c __STDC_NO_ATOMICS__, as MSVC does).
  * @{
  */
-#if !defined(ZXC_USE_C11_ATOMICS) && !defined(__cplusplus) && defined(__STDC_VERSION__) && \
-    __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_ATOMICS__)
+/* backport for 4.19: respect ZXC_USE_C11_ATOMICS=0 from zxc_deps.h to skip <stdatomic.h>. */
+#if !defined(ZXC_USE_C11_ATOMICS) && !defined(__cplusplus) && !defined(__STDC_NO_ATOMICS__)
 #include <stdatomic.h>
 #define ZXC_ATOMIC _Atomic
 #define ZXC_USE_C11_ATOMICS 1
-#else
+#elif !defined(ZXC_USE_C11_ATOMICS)
 #define ZXC_ATOMIC volatile
 #define ZXC_USE_C11_ATOMICS 0
+#else
+#define ZXC_ATOMIC volatile
 #endif
 /** @} */ /* end of Atomic Qualifier */
 
@@ -183,10 +188,6 @@ extern "C" {
 
 /** @def ZXC_NOINLINE
  * @brief Prevents a function from being inlined into its callers.
- *
- * Uses the double-underscore spelling: the kernel headers define a `noinline`
- * macro (include/linux/compiler_attributes.h), which would otherwise expand
- * inside the attribute list and break the build.
  */
 #define ZXC_NOINLINE __attribute__((__noinline__))
 
@@ -250,17 +251,11 @@ extern "C" {
 #define ZXC_NOINLINE
 #define ZXC_COLD
 
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-/* _Alignas is a C11 keyword handled by the compiler: no <stdalign.h> include
- * (the kernel does not ship that header). */
-#define ZXC_ALIGN(x) _Alignas(x)
-#else
 /** @def ZXC_ALIGN
- * @brief No-op alignment macro for compilers without alignment support.
- * @param x Ignored (alignment not supported).
+ * @brief Specifies memory alignment using C11 _Alignas.
+ * @param x Alignment boundary in bytes (must be a power of 2).
  */
-#define ZXC_ALIGN(x)
-#endif
+#define ZXC_ALIGN(x) _Alignas(x)
 #endif
 /** @} */ /* end of Compiler Abstractions */
 
@@ -314,20 +309,29 @@ extern "C" {
 
 /**
  * @name File Format Constants
- * @brief Magic words, header sizes, block sizes, and related constants.
+ * @brief Header fields, block sizes, and related constants. The magic words are
+ *        public, in zxc_constants.h.
  * @{
  */
 
-/** @brief Magic word identifying ZXC files (little-endian 0x9CB02EF5). */
-#define ZXC_MAGIC_WORD 0x9CB02EF5U
-/** @brief Current on-disk file format version. The decoder accepts only this
- *  version; Older versions are rejected with ZXC_ERROR_BAD_VERSION. */
-#define ZXC_FILE_FORMAT_VERSION 8
+/** @brief Whether the first @p n bytes (up to 4) at @p p agree with the magic word, so
+ *  a frame may start there: the check a reader makes as bytes arrive. */
+static inline int zxc_magic_prefix_ok(const uint8_t* p, const size_t n) {
+    static const uint8_t magic[4] = {(uint8_t)ZXC_MAGIC_WORD, (uint8_t)(ZXC_MAGIC_WORD >> 8),
+                                     (uint8_t)(ZXC_MAGIC_WORD >> 16),
+                                     (uint8_t)(ZXC_MAGIC_WORD >> 24)};
+    for (size_t i = 0; i < n && i < sizeof(magic); i++)
+        if (p[i] != magic[i]) return 0;
+    return 1;
+}
+/** @brief Current on-disk file format version. A decoder for version N reads 9 to N
+ *  (FORMAT.md Sec 10.3); others get ZXC_ERROR_BAD_VERSION. */
+#define ZXC_FILE_FORMAT_VERSION 9
 
 /** @brief Safety padding appended to buffers to tolerate overruns. */
 #define ZXC_PAD_SIZE 32
 /**
- * @brief Readable bytes a GLO/GHI payload guarantees after its literal section.
+ * @brief Readable bytes a SPL/PAK payload guarantees after its literal section.
  *
  * A wire guarantee, not a buffer allowance - hence separate from
  * @ref ZXC_PAD_SIZE even though the values match. RAW literals point into the
@@ -349,15 +353,27 @@ extern "C" {
  * guarantees the fast path is reachable and that tail bounds checks
  * never spuriously reject the last literals of a valid block.
  *
+ * Sized by the PAK 4x loop, whose entry check runs once per batch: four
+ * sequences of inline (pre-varint) output, plus the wild-copy overshoot.
+ * Memory safety rests on this bound (static_assert below); SPL needs less.
+ *
  * @see zxc_decompress_block_bound()
  */
-#define ZXC_DECOMPRESS_TAIL_PAD (ZXC_PAD_SIZE * 66)
+#define ZXC_DECOMPRESS_TAIL_PAD (4 * ZXC_PAK_MAX_INLINE_OUT_PER_SEQ + ZXC_PAD_SIZE) /* 2084 */
+/**
+ * @brief Output per multi-threaded decode job: smaller blocks travel several to
+ *        a job, paying the thread handoff once. Used by the FILE* engine
+ *        (regular files only) and the seekable range reader.
+ */
+#define ZXC_MT_BATCH_BYTES ((size_t)256 * 1024)
 /** @brief Assumed CPU cache line size for alignment. */
 #define ZXC_CACHE_LINE_SIZE 64
 /** @brief Bitmask for cache-line alignment checks. */
-#define ZXC_ALIGNMENT_MASK (ZXC_CACHE_LINE_SIZE - 1)
+#define ZXC_ALIGNMENT_MASK ((size_t)ZXC_CACHE_LINE_SIZE - 1)
 /** @brief Round @p x up to the next cache-line boundary. */
 #define ZXC_ALIGN_CL(x) (((x) + ZXC_ALIGNMENT_MASK) & ~(size_t)ZXC_ALIGNMENT_MASK)
+static_assert((ZXC_CACHE_LINE_SIZE & ZXC_ALIGNMENT_MASK) == 0,
+              "ZXC_CACHE_LINE_SIZE must be a power of two");
 
 /**
  * @brief Number of @c uint64_t words needed to hold a bitmap of @p n_bits.
@@ -370,18 +386,29 @@ extern "C" {
 #define ZXC_FILE_FLAG_HAS_CHECKSUM 0x80U
 /** @brief Bit flag in the Flags byte indicating a dictionary is required (bit 6). */
 #define ZXC_FILE_FLAG_HAS_DICTIONARY 0x40U
+/** @brief Bit flag in the Flags byte: a SEK block sits between the EOF block and the footer
+ *  (bit 5). */
+#define ZXC_FILE_FLAG_HAS_SEEK_TABLE 0x20U
+/** @brief Reserved bit in the Flags byte (bit 4), must be 0. */
+#define ZXC_FILE_FLAG_RESERVED 0x10U
 /** @brief Mask for the checksum algorithm id (bits 0-3). */
 #define ZXC_FILE_CHECKSUM_ALGO_MASK 0x0FU
+static_assert(((ZXC_FILE_FLAG_HAS_CHECKSUM | ZXC_FILE_FLAG_HAS_DICTIONARY |
+                ZXC_FILE_FLAG_HAS_SEEK_TABLE | ZXC_FILE_FLAG_RESERVED) &
+               ZXC_FILE_CHECKSUM_ALGO_MASK) == 0,
+              "a file flag overlaps the checksum algorithm id");
 
-/** @brief Magic word identifying ZXC dictionary files (.zxd). */
-#define ZXC_DICT_MAGIC 0x9CB0D1C7U
 /** @brief Current dictionary file format version. A 128-byte packed Huffman
  *         code-lengths table (shared literal table) always follows the
- *         dictionary content. */
-#define ZXC_DICT_VERSION 1
+ *         dictionary content. Version 2 re-signs the header with the
+ *         multiplicative hash of FORMAT.md section 7.1, so version 1 fails on
+ *         the version byte instead of on an unmatchable checksum. */
+#define ZXC_DICT_VERSION 2
 /** @brief K-gram length scanned by the dictionary trainer. Aligned on the LZ
  *         minimum match length so trained patterns are matchable at encode time. */
 #define ZXC_DICT_KGRAM_LEN ZXC_LZ_MIN_MATCH_LEN
+/** @brief Longest trainer segment: one repetitive region cannot take the whole budget. */
+#define ZXC_DICT_SEGMENT_MAX 4096
 /** @brief Address bits for the dictionary trainer's k-gram frequency table. */
 #define ZXC_DICT_HASH_BITS 16
 /** @brief Maximum number of candidate segments the dictionary trainer keeps. */
@@ -402,72 +429,114 @@ extern "C" {
 #define ZXC_BLOCK_HEADER_SIZE 8
 /** @brief Size of the per-block checksum field in bytes. */
 #define ZXC_BLOCK_CHECKSUM_SIZE 4
-/** @brief Binary size of a GLO block sub-header. */
-#define ZXC_GLO_HEADER_BINARY_SIZE 12
-/** @brief Binary size of a GHI block sub-header. */
-#define ZXC_GHI_HEADER_BINARY_SIZE 12
+/** @brief Binary size of a SPL block sub-header. */
+#define ZXC_SPL_HEADER_BINARY_SIZE 12
+/** @brief Binary size of a PAK block sub-header. */
+#define ZXC_PAK_HEADER_BINARY_SIZE 12
+/** @brief Widest SPL section descriptors: the literal and token section sizes. */
+#define ZXC_SPL_DESC_MAX_SIZE (2 * sizeof(uint32_t))
 
 /** @brief Worst-case format overhead inside a single block beyond the outer
  *  8-byte block header and the optional 4-byte checksum.
  *
- *  Sub-header (12 B) + widest GLO section descriptors (8 B) + widest slack padding
- *  (@ref ZXC_BLOCK_LIT_SLACK) = 52 B, plus the customary 16 B of margin for
- *  future format evolution. Used by zxc_compress_block_bound() and
- *  zxc_compress_bound().
+ *  Sub-header (12 B) + widest SPL section descriptors (@ref ZXC_SPL_DESC_MAX_SIZE,
+ *  8 B) + widest slack padding (@ref ZXC_BLOCK_LIT_SLACK) = 52 B, plus the
+ *  customary 16 B of margin for future format evolution. Used by
+ *  zxc_compress_block_bound() and zxc_compress_bound().
  */
 #define ZXC_BLOCK_FORMAT_OVERHEAD 68
+static_assert(ZXC_BLOCK_FORMAT_OVERHEAD >=
+                  ZXC_SPL_HEADER_BINARY_SIZE + ZXC_SPL_DESC_MAX_SIZE + ZXC_BLOCK_LIT_SLACK,
+              "ZXC_BLOCK_FORMAT_OVERHEAD must cover sub-header, descriptors and slack");
 
 /** @brief Checksum algorithm id for RapidHash (default, sole implementation). */
 #define ZXC_CHECKSUM_RAPIDHASH 0
 
-/** @brief Size of the global checksum appended after EOF block (4 bytes). */
-#define ZXC_GLOBAL_CHECKSUM_SIZE 4
-
 /** @name Seekable Format Constants
  *  @brief Seek table block appended between EOF block and footer.
  *
- *  The seek table is optional (opt-in at compression time) and allows
- *  random-access decompression by recording per-block compressed and
- *  decompressed sizes.  It uses a standard ZXC block header with
- *  @c block_type = @c ZXC_BLOCK_SEK.
- *
- *  Detection from the end of the file: the reader derives @c num_blocks
- *  from the file footer (total decompressed size) and file header (block size).
- *  It then seeks backward to validate the SEK block header.
+ *  Optional: a @c ZXC_BLOCK_SEK block of groups, each a u64 anchor (its first
+ *  block's offset) then one u32 on-disk size per block. Readers derive the block
+ *  count from the footer and read groups on access; the header's size field
+ *  holds the table size modulo 2^32.
  *  @{ */
-/** @brief Per-block entry size: comp_size(4) only.  decomp_size is derived
- *  from the file header's block_size (all blocks except the last are full). */
-#define ZXC_SEEK_ENTRY_SIZE 4
+/** @brief Blocks per group. A format constant: changing it is a version bump. */
+#define ZXC_SEEK_GROUP 64U
+/** @brief Group anchor: offset of its first block, u64. */
+#define ZXC_SEEK_ANCHOR_SIZE 8U
+/** @brief One block's on-disk size, u32. */
+#define ZXC_SEEK_SIZE_ENTRY 4U
+/** @brief Full group: anchor + ZXC_SEEK_GROUP sizes. */
+#define ZXC_SEEK_GROUP_BYTES (ZXC_SEEK_ANCHOR_SIZE + ZXC_SEEK_GROUP * ZXC_SEEK_SIZE_ENTRY)
+
+/** @brief Groups holding @p nblocks blocks; the last one may be partial. */
+static ZXC_ALWAYS_INLINE uint64_t zxc_seek_group_count(const uint64_t nblocks) {
+    return (nblocks + ZXC_SEEK_GROUP - 1) / ZXC_SEEK_GROUP;
+}
+
+/** @brief Blocks in group @p g of @p nblocks: ZXC_SEEK_GROUP, fewer for the last. */
+static ZXC_ALWAYS_INLINE uint32_t zxc_seek_group_len(const uint64_t nblocks, const uint64_t g) {
+    const uint64_t left = nblocks - g * ZXC_SEEK_GROUP;
+    return left < ZXC_SEEK_GROUP ? (uint32_t)left : ZXC_SEEK_GROUP;
+}
+
+/** @brief Byte size of the groups for @p nblocks blocks, in 64 bits. */
+static ZXC_ALWAYS_INLINE uint64_t zxc_seek_table_bytes(const uint64_t nblocks) {
+    return zxc_seek_group_count(nblocks) * ZXC_SEEK_ANCHOR_SIZE + nblocks * ZXC_SEEK_SIZE_ENTRY;
+}
+
+/** @brief SEK header size field: @p table_bytes with its high half folded onto the low
+ *  one. Exact below 4 GiB; above, all 64 bits count. */
+static ZXC_ALWAYS_INLINE uint32_t zxc_seek_size_field(const uint64_t table_bytes) {
+#if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_ARM64) || defined(_M_ARM64EC))
+    // MSVC 19.51 ARM64 /O2 sees the table size as 4U and compiles this fold into
+    // `ror w, #30` on the low half of u, dropping the high word: tables of 4 GiB
+    // and more get a wrong field. A volatile copy hides that shape. Once per table.
+    const volatile uint64_t t = table_bytes;
+    return (uint32_t)(t ^ (t >> 32));
+#else
+    return (uint32_t)(table_bytes ^ (table_bytes >> 32));
+#endif
+}
+
 /** @} */ /* end of Seekable Format Constants */
 
-/** @name GLO Token Constants
+/** @name SPL Token Constants
  *  @brief 4-bit literal length / 4-bit match length / 16-bit offset.
  *  @{ */
-/** @brief Bits for Literal Length in a GLO token. */
+/** @brief Bits for Literal Length in a SPL token. */
 #define ZXC_TOKEN_LIT_BITS 4
-/** @brief Bits for Match Length in a GLO token. */
+/** @brief Bits for Match Length in a SPL token. */
 #define ZXC_TOKEN_ML_BITS 4
-/** @brief Mask to extract Literal Length from a GLO token. */
+/** @brief Mask to extract Literal Length from a SPL token. */
 #define ZXC_TOKEN_LL_MASK ((1U << ZXC_TOKEN_LIT_BITS) - 1)
-/** @brief Mask to extract Match Length from a GLO token. */
+/** @brief Mask to extract Match Length from a SPL token. */
 #define ZXC_TOKEN_ML_MASK ((1U << ZXC_TOKEN_ML_BITS) - 1)
+static_assert(ZXC_TOKEN_LIT_BITS == 4 && ZXC_TOKEN_ML_BITS == 4,
+              "the SPL decoder reads its tokens as two nibbles");
 /** @} */
 
-/** @name GHI Sequence Constants
+/** @name PAK Sequence Constants
  *  @brief 8-bit literal length / 8-bit match length / 16-bit offset.
  *  @{ */
-/** @brief Bits for Literal Length in a GHI sequence. */
+/** @brief Bits for Literal Length in a PAK sequence. */
 #define ZXC_SEQ_LL_BITS 8
-/** @brief Bits for Match Length in a GHI sequence. */
+/** @brief Bits for Match Length in a PAK sequence. */
 #define ZXC_SEQ_ML_BITS 8
-/** @brief Bits for Offset in a GHI sequence. */
+/** @brief Bits for Offset in a PAK sequence. */
 #define ZXC_SEQ_OFF_BITS 16
-/** @brief Mask to extract Literal Length from a GHI sequence. */
+/** @brief Mask to extract Literal Length from a PAK sequence. */
 #define ZXC_SEQ_LL_MASK ((1U << ZXC_SEQ_LL_BITS) - 1)
-/** @brief Mask to extract Match Length from a GHI sequence. */
+/** @brief Mask to extract Match Length from a PAK sequence. */
 #define ZXC_SEQ_ML_MASK ((1U << ZXC_SEQ_ML_BITS) - 1)
-/** @brief Mask to extract Offset from a GHI sequence. */
+/** @brief Mask to extract Offset from a PAK sequence. */
 #define ZXC_SEQ_OFF_MASK ((1U << ZXC_SEQ_OFF_BITS) - 1)
+/** @brief Shift of the Literal Length field: the top byte of the word. */
+#define ZXC_SEQ_LL_SHIFT (ZXC_SEQ_ML_BITS + ZXC_SEQ_OFF_BITS)
+/** @brief Shift of the Match Length field: just above the offset. */
+#define ZXC_SEQ_ML_SHIFT ZXC_SEQ_OFF_BITS
+static_assert(ZXC_SEQ_LL_BITS + ZXC_SEQ_ML_BITS + ZXC_SEQ_OFF_BITS == 32,
+              "a PAK sequence is one 32-bit word");
 /** @} */
 
 /** @name Literal Stream Encoding
@@ -476,6 +545,12 @@ extern "C" {
 #define ZXC_LIT_RLE_FLAG 0x80U
 /** @brief Mask to extract the run/literal length (lower 7 bits). */
 #define ZXC_LIT_LEN_MASK (ZXC_LIT_RLE_FLAG - 1)
+/** @brief Longest literal run one token carries: a length field of 0 means 1 byte. */
+#define ZXC_LIT_RUN_MAX (ZXC_LIT_LEN_MASK + 1U) /* 128 */
+/** @brief Shortest run worth an RLE token: a length field of 0 means this many bytes. */
+#define ZXC_LIT_RLE_RUN_MIN 4U
+/** @brief Longest run one RLE token carries. */
+#define ZXC_LIT_RLE_RUN_MAX (ZXC_LIT_LEN_MASK + ZXC_LIT_RLE_RUN_MIN) /* 131 */
 /** @} */
 
 /** @name LZ77 Constants
@@ -491,10 +566,6 @@ extern "C" {
  *  @{ */
 /** @brief Address bits for the LZ77 hash table (2^15 = 32 768 buckets). */
 #define ZXC_LZ_HASH_BITS 15
-/** @brief Marsaglia multiplicative hash constant for 4-byte hashing. */
-#define ZXC_LZ_HASH_PRIME1 0x2D35182DU
-/** @brief Marsaglia/Vigna xorshift* multiplier for 5-byte hashing. */
-#define ZXC_LZ_HASH_PRIME2 0x2545F4914F6CDD1DULL
 /** @brief Maximum number of entries in the hash table. */
 #define ZXC_LZ_HASH_SIZE (1U << ZXC_LZ_HASH_BITS)
 /** @brief Sliding window size (64 KB). */
@@ -512,31 +583,118 @@ extern "C" {
  * the encoder refuses to emit values above this bound. Together they bound the
  * varint surface to exactly the format-defined block size limit. */
 #define ZXC_MAX_VARINT_VALUE ((uint32_t)(ZXC_BLOCK_SIZE_MAX - 1U))
+/** @brief A truncated or out-of-spec varint: a length no output holds. */
+#define ZXC_VARINT_INVALID (2U * ZXC_BLOCK_SIZE_MAX)
+/** @name Varint reach: the first value each encoded length cannot hold (7, 14, 21 bits).
+ *  @{ */
+#define ZXC_VARINT_1B_LIMIT (1U << 7)
+#define ZXC_VARINT_2B_LIMIT (1U << 14)
+#define ZXC_VARINT_3B_LIMIT (1U << 21)
+/** @} */
+static_assert(ZXC_MAX_VARINT_VALUE < ZXC_VARINT_3B_LIMIT, "varint values must fit the 3-byte form");
+static_assert(ZXC_BLOCK_SIZE_MIN <= ZXC_BLOCK_SIZE_DEFAULT &&
+                  ZXC_BLOCK_SIZE_DEFAULT <= ZXC_BLOCK_SIZE_MAX &&
+                  (ZXC_BLOCK_SIZE_DEFAULT & (ZXC_BLOCK_SIZE_DEFAULT - 1)) == 0,
+              "ZXC_BLOCK_SIZE_DEFAULT must be a power of two within the block size range");
+static_assert((ZXC_LZ_WINDOW_SIZE & ZXC_LZ_WINDOW_MASK) == 0,
+              "ZXC_LZ_WINDOW_SIZE must be a power of two (ring mask)");
+static_assert(ZXC_LZ_WINDOW_SIZE <= (1U << ZXC_SEQ_OFF_BITS),
+              "chain_table holds window positions in 16 bits");
+
+/**
+ * @brief Reads a Prefix Varint encoded integer.
+ *
+ * Unary prefix bits in the first byte give the total length, at most 3 bytes
+ * since that covers every length the format admits:
+ *
+ * Format:
+ * - 1 byte  (0xxxxxxx):  7-bit payload (val < 2^7  = 128)
+ * - 2 bytes (10xxxxxx): 14-bit payload (val < 2^14 = 16384)
+ * - 3 bytes (110xxxxx): 21-bit payload (val < 2^21 = 2097152)
+ *
+ * @param[in,out] ptr Pointer to a pointer to the current position in the stream.
+ * @param[in] end Pointer to the end of the readable stream (for bounds checking).
+ * @return The decoded 32-bit integer, or @ref ZXC_VARINT_INVALID if the encoding is
+ *         truncated or out of spec.
+ */
+static ZXC_ALWAYS_INLINE uint32_t zxc_read_varint(const uint8_t** ptr, const uint8_t* end) {
+    const uint8_t* p = *ptr;
+    if (UNLIKELY(p >= end)) return ZXC_VARINT_INVALID;
+
+    const uint32_t b0 = p[0];
+
+    // 1 Byte: 0xxxxxxx (7 bits) -> val < 128 (2^7)
+    if (LIKELY(b0 < 0x80)) {
+        *ptr = p + 1;
+        return b0;
+    }
+
+    // 2 Bytes: 10xxxxxx xxxxxxxx (14 bits) -> val < 16384 (2^14)
+    if (LIKELY(b0 < 0xC0)) {
+        if (UNLIKELY(p + 1 >= end)) {
+            *ptr = end;
+            return ZXC_VARINT_INVALID;
+        }
+        *ptr = p + 2;
+        return (b0 & 0x3F) | ((uint32_t)p[1] << 6);
+    }
+
+    // 3 Bytes: 110xxxxx xxxxxxxx xxxxxxxx (21 bits) -> val < 2^21. The longest
+    // a legitimate varint can be: values are (ll - MASK) or (ml - MASK), always
+    // strictly below block_size_max = 2^21.
+    if (LIKELY(b0 < 0xE0)) {
+        if (UNLIKELY(p + 2 >= end)) {
+            *ptr = end;
+            return ZXC_VARINT_INVALID;
+        }
+        *ptr = p + 3;
+        return (b0 & 0x1F) | ((uint32_t)p[1] << 5) | ((uint32_t)p[2] << 13);
+    }
+
+    // extra encoding: out-of-spec for the current format, reject.
+    *ptr = end;
+    return ZXC_VARINT_INVALID;
+}
+
 /** @brief Maximum decoded output of one sequence with inline ll/ml, used by the
  *         4x bounds checks to reserve the rest of a batch.
  *
  *         Keep it small - the loop margins scale with it. Widening it to 543
  *         once cost 2 percent of decode on silesia. */
-#define ZXC_GLO_MAX_INLINE_OUT_PER_SEQ ((ZXC_TOKEN_LL_MASK - 1U) + ZXC_GLO_MAX_INLINE_ML) /* 33 */
-/** @brief Longest match a GLO sequence carries without a varint extension.
+#define ZXC_SPL_MAX_INLINE_OUT_PER_SEQ ((ZXC_TOKEN_LL_MASK - 1U) + ZXC_SPL_MAX_INLINE_ML) /* 33 */
+/** @brief Longest match length code (length minus ZXC_LZ_MIN_MATCH_LEN) a SPL
+ *         token carries inline; the code above it escapes to a varint. */
+#define ZXC_SPL_INLINE_ML_CODE (ZXC_TOKEN_ML_MASK - 1U) /* 14 */
+/** @brief Longest match a SPL sequence carries without a varint extension.
  *
  * Below @ref ZXC_PAD_SIZE, so the inline path needs no length ladder: one
  * 32-byte store covers it. The escape path always yields more, so comparing
  * against this recovers "was the ml nibble inline". */
-#define ZXC_GLO_MAX_INLINE_ML ((ZXC_TOKEN_ML_MASK - 1U) + ZXC_LZ_MIN_MATCH_LEN) /* 19 */
-#define ZXC_GHI_MAX_INLINE_OUT_PER_SEQ \
+#define ZXC_SPL_MAX_INLINE_ML (ZXC_SPL_INLINE_ML_CODE + ZXC_LZ_MIN_MATCH_LEN) /* 19 */
+#define ZXC_PAK_MAX_INLINE_OUT_PER_SEQ \
     ((ZXC_SEQ_LL_MASK - 1U) + (ZXC_SEQ_ML_MASK - 1U) + ZXC_LZ_MIN_MATCH_LEN) /* 513 */
 /** @brief Base bias added to encoded offsets (stored = actual - bias). */
 #define ZXC_LZ_OFFSET_BIAS 1
 /** @brief Maximum allowed offset distance. */
 #define ZXC_LZ_MAX_DIST (ZXC_LZ_WINDOW_SIZE - 1)
+static_assert(ZXC_SPL_MAX_INLINE_ML <= ZXC_PAD_SIZE, "an inline SPL match is one 32-byte store");
+static_assert(ZXC_LZ_WINDOW_SIZE - ZXC_LZ_OFFSET_BIAS <= ZXC_SEQ_OFF_MASK,
+              "a biased offset must fit the 16-bit wire field");
+static_assert(ZXC_DECOMPRESS_TAIL_PAD == 2084,
+              "ZXC_DECOMPRESS_TAIL_PAD feeds the public bounds: change it on purpose only");
+static_assert(4 * ZXC_SPL_MAX_INLINE_OUT_PER_SEQ + ZXC_PAD_SIZE + 4 <= ZXC_DECOMPRESS_TAIL_PAD,
+              "ZXC_DECOMPRESS_TAIL_PAD must also hold the SPL 4x loop margin");
+static_assert(ZXC_VARINT_INVALID > ZXC_BLOCK_SIZE_MAX + ZXC_DECOMPRESS_TAIL_PAD,
+              "an invalid varint must exceed every output capacity");
+static_assert(ZXC_DICT_SIZE_MAX <= ZXC_LZ_MAX_DIST, "a dictionary must stay within offset reach");
 
 /** @brief Match distance floor the encoder holds to at levels 1 to 5, sized to
- *         the decoder's widest match-copy arm.
+ *         the decoder's widest match-copy arm so the overlap kernel stays off
+ *         the decode path.
  *
  *  Applied per block, and only where @ref ZXC_LZ_MINDIST_MAX_SHORT_PCT clears
  *  it; levels 6 and 7 keep every distance. Encoder policy: no format bit moves,
- *  so any decoder of the same format version still reads the result. */
+ *  so any decoder of the same format version reads the result. 1 disables. */
 #define ZXC_LZ_MINDIST 32
 
 /** @brief Probe sampling: one position per KB, clamped.
@@ -570,25 +728,36 @@ extern "C" {
 /** @brief Threshold above which `find_best_match` is skipped at intra-match
  *         positions, keeping the parser O(N) on highly repetitive data. */
 #define ZXC_OPT_LONG_MATCH_SKIP ((size_t)256)
+static_assert(ZXC_OPT_LONG_MATCH_SKIP <=
+                  ZXC_LZ_MIN_MATCH_LEN + ZXC_TOKEN_ML_MASK + ZXC_VARINT_2B_LIMIT,
+              "covered positions relax only the first two match cost classes");
 /** @brief Minimum literal count for the sample-based Huffman cost estimator
  *         used by the optimal parser. Below this, the strided sample is too
  *         small for the resulting code-lengths to be statistically reliable,
  *         so the estimator falls back to RAW cost (8 bits/byte). */
 #define ZXC_OPT_LIT_SAMPLE_MIN 1024
+/** @brief Bytes that estimator samples per block: enough for a 256-symbol histogram. */
+#define ZXC_OPT_LIT_SAMPLE_TARGET 4096
 
 /** @} */
 
-/** @name Hash Prime Constants
- *  @brief Mixing primes used by internal hash functions.
+/** @name Hash multipliers
+ *  @brief Odd constants that mix bits in the LZ match hash, the header checksums
+ *  (Sec 7.1) and the archive digest (Sec 7.3). The header-hash and digest values
+ *  are fixed by the on-disk format; changing them is a version bump.
  *  @{ */
-/** @brief Hash prime 1. */
-#define ZXC_HASH_PRIME1 0x9E3779B97F4A7C15ULL
-/** @brief Hash prime 2. */
-#define ZXC_HASH_PRIME2 0xD2D84A61D2D84A61ULL
+/** @brief Golden-ratio prime: header hashes and the digest spread. */
+#define ZXC_HASH_GOLDEN64 0x9E3779B97F4A7C15ULL
+/** @brief Vigna's xorshift* multiplier: the 5-byte LZ hash and the digest fold. */
+#define ZXC_HASH_XORSHIFT64 0x2545F4914F6CDD1DULL
+/** @brief Marsaglia 32-bit multiplier: the 4-byte LZ and dictionary hash. */
+#define ZXC_HASH_MULT32 0x2D35182DU
+/** @brief Second multiplier of the 16-byte header hash (@ref zxc_hash16). */
+#define ZXC_HASH_MULT64 0xD2D84A61D2D84A61ULL
 /** @} */
 
 /** @name Huffman Codec Constants
- *  @brief Length-limited canonical Huffman codec for GLO literal sections
+ *  @brief Length-limited canonical Huffman codec for SPL literal sections
  *         (level >= 6) and level-7 token sections, in the PivCo layout.
  *
  *  On-disk section payload layout (FORMAT.md section 5.2.1):
@@ -615,77 +784,60 @@ extern "C" {
 #define ZXC_HUF_MAX_CODE_LEN_DENSITY 8
 /** @brief Alphabet size: one entry per possible byte value. */
 #define ZXC_HUF_NUM_SYMBOLS 256
+static_assert(ZXC_HUF_MAX_CODE_LEN_DENSITY <= ZXC_HUF_MAX_CODE_LEN_ULTRA,
+              "the decoder accepts code lengths up to ZXC_HUF_MAX_CODE_LEN_ULTRA only");
+static_assert(ZXC_HUF_MAX_CODE_LEN_ULTRA <= 0x0F && ZXC_HUF_TABLE_SIZE * 2 == ZXC_HUF_NUM_SYMBOLS,
+              "code lengths are packed one nibble per symbol");
 
 /** @brief Upper bound on PivCo tree nodes (full binary tree over the alphabet). */
 #define ZXC_PIVCO_MAX_NODES (2 * ZXC_HUF_NUM_SYMBOLS - 1)
+/** @brief Node-indexed array size: every node, plus a slot for the lone-symbol
+ *  root's missing child. */
+#define ZXC_PIVCO_NODE_SLOTS (ZXC_PIVCO_MAX_NODES + 1)
 /** @brief Deepest flat subtree ::zxc_pivco_unpack_flat unpacks with a SIMD
  *         kernel (its D == 2..6 cases); deeper flat roots take the scalar
  *         bit-reader. A structural fact of that unpacker, not tunable. */
 #define ZXC_PIVCO_UNPACK_FLAT_SIMD_MAX 6
 
-/** @brief One PivCo Huffman tree node. */
-typedef struct {
-    int16_t child[2]; /* node index, -1 = absent */
-    int16_t sym;      /* >= 0: leaf symbol; -1: internal */
-} zxc_pivco_node_t;
+/** @brief @c flat_d of a node inside a flat root: no run, no children. */
+#define ZXC_PIVCO_COVERED 0xFFU
 
 /**
- * @brief Canonical Huffman tree in PivCo (level-ordered) form.
+ * @brief A PivCo code tree: its canonical shape, by depth.
  *
- * Derived deterministically from the 128-byte packed code lengths by
- * zxc_huf_dict_tree_build / the section decoders; pure value type (index-based,
- * no internal pointers), safe to copy or embed. Embedded in ::zxc_cctx_t so a
- * dictionary's shared table is built ONCE at attach instead of per block.
+ * Canonical codes fix the tree from the leaf counts alone. Each depth holds
+ * its leaves, then its internal nodes; the k-th internal node's children are
+ * positions 2k and 2k+1 below. That is the wire order, so a node is a (depth,
+ * position) pair, and the d-bit prefix p is node base[d] + p.
+ *
+ * Under a flat root the leaves sit in packed-code order, not symbol order:
+ * they are the decoder's code -> symbol table, and each leaf's code ends with
+ * its packed code.
+ *
+ * Depth arrays cover 0 to max_depth; node_base and leaf_base also mark where
+ * the last depth ends. Node arrays cover every node and the slot.
  */
 typedef struct {
-    zxc_pivco_node_t nd[ZXC_PIVCO_MAX_NODES];
-    int16_t bfs[ZXC_PIVCO_MAX_NODES]; /* node ids in BFS (== wire) order */
-    int16_t lvl_start[ZXC_HUF_MAX_CODE_LEN_ULTRA + 2];
-    int n_nodes;
+    uint16_t node_base[ZXC_HUF_MAX_CODE_LEN_ULTRA + 2]; /**< First node index of each depth. */
+    uint16_t leaf_base[ZXC_HUF_MAX_CODE_LEN_ULTRA + 2]; /**< First @c syms index of each depth. */
+    int16_t base[ZXC_HUF_MAX_CODE_LEN_ULTRA + 1];       /**< Node index of the d-bit prefix 0. */
     int max_depth;
-    // Flat-subtree fast path: flat_d[nid] = D (>= 2) when nid roots a MAXIMAL
-    // complete subtree with all leaves exactly D levels down. Its wire run is
-    // the symbols' packed D-bit residuals instead of D partition bitmaps (same
-    // bits, decode = unpack+lookup), and covered[nid] marks its strict
-    // descendants, absent from the wire. Both sides derive this from the code
-    // lengths, so nothing is signalled.
-    uint8_t flat_d[ZXC_PIVCO_MAX_NODES];
-    uint8_t covered[ZXC_PIVCO_MAX_NODES];
+    uint8_t syms[ZXC_HUF_NUM_SYMBOLS];    /**< Leaf symbols, depth by depth. */
+    uint8_t flat_d[ZXC_PIVCO_NODE_SLOTS]; /**< Flat-root depth, 0, or ::ZXC_PIVCO_COVERED. */
 } zxc_pivco_tree_t;
-
-/**
- * @brief Precomputed decode-side tables derived from a ::zxc_pivco_tree_t.
- *
- * Pure functions of the tree topology (no dependence on section data):
- * @c skip flags the children of leaf-pair parents (emitted directly by the
- * parent's XOR-blend, never materialised), and @c c2s_pool holds each flat
- * root's packed-code -> symbol table at @c c2s_off[nid]. Flat subtrees have
- * disjoint leaves, so the pool never exceeds ZXC_HUF_NUM_SYMBOLS entries; the
- * +16 slack covers zxc_pivco_unpack_flat's SIMD table loads, which round a
- * table up to 16 entries. Per-section trees rebuild these inline in
- * zxc_pivco_decode_core; dictionary trees build them ONCE at attach so the
- * small-block dict decode path stops repaying the DFS + fills per block.
- */
-typedef struct {
-    uint8_t skip[ZXC_PIVCO_MAX_NODES];          /**< 1 = child of a leaf-pair parent. */
-    uint16_t c2s_off[ZXC_PIVCO_MAX_NODES];      /**< Flat roots: offset into c2s_pool. */
-    uint8_t c2s_pool[ZXC_HUF_NUM_SYMBOLS + 16]; /**< Concatenated c2s tables. */
-} zxc_pivco_decode_aux_t;
 
 /**
  * @brief Frame-constant dictionary Huffman state, prebuilt once at attach.
  *
- * Bundles everything the per-block dict paths reuse: the PivCo @c tree (decoder
- * + estimator), the canonical @c codes / @c code_len (encoder), and the
- * decode-side @c dec tables. Carved from the context workspace only when
- * @c dict_size > 0, so no-dict contexts pay nothing for it. Built by
- * @ref zxc_huf_dict_tree_build via @c zxc_cctx_attach_dict_huf.
+ * The PivCo @c tree (decoder and estimator) and the @c codes / @c code_len
+ * (encoder), reused by every dict block. Carved from the workspace only when
+ * @c dict_size > 0. Built by @ref zxc_huf_dict_tree_build via
+ * @c zxc_cctx_attach_dict_huf.
  */
 typedef struct {
     zxc_pivco_tree_t tree;                 /**< PivCo tree from the shared literal table. */
-    uint32_t codes[ZXC_HUF_NUM_SYMBOLS];   /**< Canonical codes (encoder side). */
+    uint32_t codes[ZXC_HUF_NUM_SYMBOLS];   /**< Leaf codes as laid out in @c tree. */
     uint8_t code_len[ZXC_HUF_NUM_SYMBOLS]; /**< Unpacked code lengths. */
-    zxc_pivco_decode_aux_t dec;            /**< Precomputed decoder tables. */
 } zxc_dict_huf_state_t;
 /** @brief RLE margin shift: source of the legacy below-ULTRA premium used by
  *         ::zxc_ss_prem_rle_q8 (256 >> shift reproduces the historical
@@ -800,18 +952,36 @@ static inline int zxc_ss_prem_huf_q8(const int level) {
 #define ZXC_HUF_MIN_LITERALS 139
 /** @} */
 
-/** @brief Clamps a resolved compression level to the supported ceiling.
- *
- *         Out-of-range levels above ::ZXC_LEVEL_ULTRA are silently clamped
- *         (never rejected) at every compress entry point, so `level = 99`
- *         behaves as ULTRA across the buffer, context, block and stream APIs
- *         and every language binding inherits the same policy. Levels <= 0
- *         select the caller's default before this is applied. */
-static inline int zxc_level_clamp(const int level) {
-    return (level > ZXC_LEVEL_ULTRA) ? ZXC_LEVEL_ULTRA : level;
-}
+/**
+ * @brief Compression parameters of a @ref zxc_cctx, the private form of what
+ *        zxc_cctx_set_param() / zxc_cctx_set_dict() / zxc_cctx_set_progress()
+ *        configure. Zero means the default for level and block_size.
+ */
+typedef struct {
+    int n_threads;
+    int level;
+    size_t block_size;
+    int checksum_enabled;
+    int seekable;
+    const void* dict;
+    size_t dict_size;
+    const void* dict_huf;
+    zxc_progress_callback_t progress_cb;
+    void* user_data;
+} zxc_cparams_t;
 
-/** @brief Dictionary length from a (possibly NULL) options struct.
+/** @brief Decompression parameters of a @ref zxc_dctx; see @ref zxc_cparams_t. */
+typedef struct {
+    int n_threads;
+    int checksum_enabled;
+    const void* dict;
+    size_t dict_size;
+    const void* dict_huf;
+    zxc_progress_callback_t progress_cb;
+    void* user_data;
+} zxc_dparams_t;
+
+/** @brief Dictionary length from a (possibly NULL) parameter struct.
  *
  *  Gated on @c dict itself: no dictionary pointer means no dictionary, whatever
  *  the sibling fields hold. Macros rather than functions because the compression
@@ -820,11 +990,31 @@ static inline int zxc_level_clamp(const int level) {
 /** @brief Shared literal Huffman table, gated on @c dict the same way. */
 #define ZXC_OPTS_DICT_HUF(o) \
     (((o) && (o)->dict && (o)->dict_size > 0) ? (const uint8_t*)(o)->dict_huf : NULL)
-/** @brief Compression level, 0 meaning the default, clamped to the highest level
- *         the encoder implements. */
-#define ZXC_OPTS_LEVEL(o, dflt) zxc_level_clamp(((o) && (o)->level > 0) ? (o)->level : (dflt))
+/** @brief Compression level, 0 meaning the default. */
+#define ZXC_OPTS_LEVEL(o, dflt) (((o) && (o)->level != 0) ? (o)->level : (dflt))
 /** @brief Block size, 0 meaning the default. */
 #define ZXC_OPTS_BLOCK_SIZE(o, dflt) (((o) && (o)->block_size > 0) ? (o)->block_size : (dflt))
+/** @name Per-block match splitting (zxc_spl_match_split_block), a level-table policy
+ *
+ *  Escaped matches up to split_max (a length code; 14 is the inline reach) go
+ *  out as inline pieces at the same offset, so the decoder skips its ML escape.
+ *  Two gates: the block's escape branch must look mispredicted, then only the
+ *  escapes of mispredicted contexts split; a predictable one would only add
+ *  sequences. A split_max at or below the inline reach (levels 1, 2, 6, 7 in
+ *  the level table) turns the pass off.
+ *  @{ */
+/** @brief Longest escape history a context keys on; small blocks shorten it
+ *         (down to 2 bits) towards 16 samples per context. Sizes the histograms. */
+#define ZXC_SPL_MATCH_SPLIT_CTX_BITS 8
+/** @brief Mispredict rate, in percent of a block's escapes, from which the
+ *         block is split. */
+#define ZXC_SPL_MATCH_SPLIT_MIN_MISPREDICT_PCT 80
+/** @brief zxc_spl_match_split_analyze's escape histograms: four rotating lanes of
+ *         [escape][context] counts, carved from the compression workspace. */
+typedef uint32_t zxc_spl_match_split_hist_t[4][2][1U << ZXC_SPL_MATCH_SPLIT_CTX_BITS];
+static_assert(ZXC_SPL_MATCH_SPLIT_CTX_BITS <= CHAR_BIT,
+              "a context is recorded in one byte of buf_split");
+/** @} */
 
 /** @brief Encoder Huffman code-length cap for a compression @p level: levels below
  *         ::ZXC_LEVEL_ULTRA use ::ZXC_HUF_MAX_CODE_LEN_DENSITY, ::ZXC_LEVEL_ULTRA uses
@@ -854,6 +1044,12 @@ typedef struct {
     int16_t idx; /**< Item index within that level. */
 } zxc_huf_pm_frame_t;
 
+/** @brief A live symbol and its weight, the package-merge sort key. */
+typedef struct {
+    uint32_t w;  /**< Frequency. */
+    int16_t sym; /**< Byte value. */
+} zxc_huf_pm_leaf_t;
+
 /** @brief Per-level item bound: at most leaves + paired packages from the
  *         previous level. */
 #define ZXC_HUF_PM_LEVEL_BOUND (2 * ZXC_HUF_NUM_SYMBOLS)
@@ -869,11 +1065,37 @@ typedef struct {
      (size_t)ZXC_HUF_MAX_CODE_LEN_ULTRA * (size_t)ZXC_HUF_PM_LEVEL_BOUND * \
          sizeof(zxc_huf_pm_frame_t))
 
+/** @brief Slot-ledger DP bound, coarse symbols per plane axis; the nudge groups
+ *         symbols to stay under it. */
+#define ZXC_HUF_NUDGE_DP_M 64
+
+/** @brief Workspace of ::zxc_huf_nudge_code_lengths: tables and DP planes, once a
+ *         10 KiB frame and a per-block allocation. Sits ::ZXC_HUF_NUDGE_SCRATCH_OFF
+ *         into the scratch, past the rebuilds' region. */
+typedef struct {
+    uint64_t pf[ZXC_HUF_NUM_SYMBOLS + 1];      /**< Canonical-order prefix sums. */
+    uint64_t pf_rank[ZXC_HUF_NUM_SYMBOLS + 1]; /**< Frequency-rank prefix sums. */
+    uint64_t pfg[ZXC_HUF_NUDGE_DP_M + 1];      /**< Group-mass prefix sums. */
+    uint64_t jcur[(ZXC_HUF_NUDGE_DP_M + 1) * (ZXC_HUF_NUDGE_DP_M + 1)]; /**< DP plane. */
+    uint64_t jnxt[(ZXC_HUF_NUDGE_DP_M + 1) * (ZXC_HUF_NUDGE_DP_M + 1)]; /**< Next plane. */
+    /** Per-level arrival choice, c <= ZXC_HUF_NUDGE_DP_M. */
+    uint8_t arrive[(ZXC_HUF_MAX_CODE_LEN_ULTRA + 1) * (ZXC_HUF_NUDGE_DP_M + 1) *
+                   (ZXC_HUF_NUDGE_DP_M + 1)];
+    zxc_huf_pm_leaf_t leaves[ZXC_HUF_NUM_SYMBOLS]; /**< Live symbols, sorted. */
+    int16_t sym_order[ZXC_HUF_NUM_SYMBOLS];        /**< Symbols by descending frequency. */
+    uint8_t cand[4][ZXC_HUF_NUM_SYMBOLS];          /**< Candidate code lengths. */
+} zxc_huf_nudge_ws_t;
+
+/** @brief Offset of the ::zxc_huf_nudge_ws_t inside a nudge scratch. */
+#define ZXC_HUF_NUDGE_SCRATCH_OFF ZXC_ALIGN_CL(ZXC_HUF_BUILD_SCRATCH_SIZE)
+/** @brief Scratch size (bytes) for ::zxc_huf_nudge_code_lengths: builder's, then workspace. */
+#define ZXC_HUF_NUDGE_SCRATCH_SIZE (ZXC_HUF_NUDGE_SCRATCH_OFF + sizeof(zxc_huf_nudge_ws_t))
+
 /**
  * @brief The four DP partitions the optimal parser carves out of opt_scratch.
  *
  * One definition shared by compute_cctx_layout(), which reserves the region,
- * and zxc_lz77_optimal_parse_glo(), which carves it: the two cannot drift.
+ * and zxc_lz77_optimal_parse_spl(), which carves it: the two cannot drift.
  */
 static ZXC_ALWAYS_INLINE void zxc_opt_dp_sizes(const size_t chunk_size, size_t* RESTRICT sz_dp,
                                                size_t* RESTRICT sz_pl, size_t* RESTRICT sz_po,
@@ -981,6 +1203,11 @@ typedef struct {
      *  candidates do not end the chain walk, which continues to a legal one
      *  further back. See @ref ZXC_LZ_MINDIST. */
     uint32_t min_offset;
+
+    /** Longest match re-emitted as inline pieces (zxc_spl_match_split_block), in the
+     *  token's units (length - ZXC_LZ_MIN_MATCH_LEN); <= ZXC_SPL_INLINE_ML_CODE
+     *  disables. SPL levels only. */
+    uint8_t split_max;
 } zxc_lz77_params_t;
 
 /**
@@ -994,19 +1221,20 @@ typedef struct {
  */
 static ZXC_ALWAYS_INLINE zxc_lz77_params_t zxc_get_lz77_params(const int level) {
     // The distance floor stops at level 5: the slow levels keep every distance.
+    // Match splitting at levels 3-5 only: 1-2 are PAK, 6-7 keep every escape.
     // search_depth, sufficient_len, use_lazy, lazy_attempts, lazy_len_threshold, step_base,
-    // step_shift, min_offset
+    // step_shift, min_offset, split_max
     static const zxc_lz77_params_t table[7] = {
-        {3, 16, 0, 0, 0, 4, 4, ZXC_LZ_MINDIST},       // fallback
-        {3, 16, 0, 0, 0, 4, 4, ZXC_LZ_MINDIST},       // level 1
-        {3, 18, 0, 0, 0, 3, 6, ZXC_LZ_MINDIST},       // level 2
-        {3, 16, 1, 4, 128, 1, 4, ZXC_LZ_MINDIST},     // level 3
-        {3, 18, 1, 4, 128, 1, 5, ZXC_LZ_MINDIST},     // level 4
-        {64, 256, 1, 16, 128, 1, 8, ZXC_LZ_MINDIST},  // level 5
-        {64, 256, 0, 0, 0, 1, 8, 1}                   // level 6
+        {3, 16, 0, 0, 0, 4, 4, ZXC_LZ_MINDIST, 0},        // fallback
+        {3, 16, 0, 0, 0, 4, 4, ZXC_LZ_MINDIST, 0},        // level 1
+        {3, 18, 0, 0, 0, 3, 6, ZXC_LZ_MINDIST, 0},        // level 2
+        {3, 16, 1, 4, 128, 1, 4, ZXC_LZ_MINDIST, 33},     // level 3
+        {3, 18, 1, 4, 128, 1, 5, ZXC_LZ_MINDIST, 24},     // level 4
+        {64, 256, 1, 16, 128, 1, 8, ZXC_LZ_MINDIST, 23},  // level 5
+        {64, 256, 0, 0, 0, 1, 8, 1, 0}                    // level 6
     };
     return (level >= ZXC_LEVEL_ULTRA)
-               ? (zxc_lz77_params_t){128, 256, 0, 0, 0, 1, 8, 1}
+               ? (zxc_lz77_params_t){128, 256, 0, 0, 0, 1, 8, 1, 0}
                : table[level < ZXC_LEVEL_FASTEST ? ZXC_LEVEL_FASTEST : level];
 }
 
@@ -1016,20 +1244,20 @@ static ZXC_ALWAYS_INLINE zxc_lz77_params_t zxc_get_lz77_params(const int level) 
  *
  * - `ZXC_BLOCK_RAW` (0): stored as-is. Used when the data is incompressible or
  *   when compressing it would make the block bigger.
- * - `ZXC_BLOCK_GLO` (1): the general path, LZ77 plus bitpacked sequences,
+ * - `ZXC_BLOCK_SPL` (1): the general path, LZ77 plus bitpacked sequences,
  *   levels 3 and up. Carries 0, 4 or 8 bytes of section descriptors depending
  *   on which streams need an explicit compressed size.
- * - `ZXC_BLOCK_GHI` (2): the speed path, levels 1 and 2. Fixed 4-byte sequence
+ * - `ZXC_BLOCK_PAK` (2): the speed path, levels 1 and 2. Fixed 4-byte sequence
  *   records and always-RAW literals make every section size derivable from the
  *   header, so it carries no descriptor at all.
- * - `ZXC_BLOCK_SEK` (254): seek table, holding per-block compressed and
- *   decompressed sizes. Sits between the EOF block and the file footer.
+ * - `ZXC_BLOCK_SEK` (254): seek table, groups of 64 blocks (u64 anchor, u32
+ *   sizes). Sits between the EOF block and the file footer.
  * - `ZXC_BLOCK_EOF` (255): end-of-file marker.
  */
 typedef enum {
     ZXC_BLOCK_RAW = 0,
-    ZXC_BLOCK_GLO = 1,
-    ZXC_BLOCK_GHI = 2,
+    ZXC_BLOCK_SPL = 1,
+    ZXC_BLOCK_PAK = 2,
     ZXC_BLOCK_SEK = 254,
     ZXC_BLOCK_EOF = 255
 } zxc_block_type_t;
@@ -1045,10 +1273,10 @@ typedef enum {
  * - `ZXC_SECTION_ENCODING_HUFFMAN`: canonical Huffman in the PivCo layout
  *   (level-ordered branch runs, max 11-bit codes -- FORMAT.md section 5.2.1).
  *   Valid for the literal stream (`enc_lit`, level >= 6) and the token
- *   stream (`enc_tok`, level 7) of GLO blocks.
+ *   stream (`enc_tok`, level 7) of SPL blocks.
  * - `ZXC_SECTION_ENCODING_HUFFMAN_DICT`: same payload as HUFFMAN but the
  *   128-byte code-lengths header is omitted: codes come from the shared
- *   table carried by the dictionary (.zxd). Only valid for `enc_lit` of GLO
+ *   table carried by the dictionary (.zxd). Only valid for `enc_lit` of SPL
  *   blocks in dictionary-compressed archives; requires the same dictionary
  *   (content + table, bound by dict_id) at decode time.
  */
@@ -1063,7 +1291,7 @@ typedef enum {
  * @struct zxc_gnr_header_t
  * @brief Header specific to General (LZ-based) compression blocks.
  *
- * This header follows the main block header when the block type is GLO/GHI. It
+ * This header follows the main block header when the block type is SPL/PAK. It
  * describes the layout of sequences and literals.
  *
  * @var zxc_gnr_header_t::n_sequences
@@ -1073,22 +1301,22 @@ typedef enum {
  * @var zxc_gnr_header_t::enc_lit
  * Encoding method used for the literal stream.
  * @var zxc_gnr_header_t::enc_tok
- * GLO only: encoding of the token section, whose bytes each pack a literal
+ * SPL only: encoding of the token section, whose bytes each pack a literal
  * length and a match length nibble. Only RAW and HUFFMAN (level 7) occur.
  * @var zxc_gnr_header_t::enc_mlen
  * Reserved, written 0 and ignored on decode. Match lengths have no stream of
  * their own: they share the token byte and spill into the extras.
  * @var zxc_gnr_header_t::enc_off
- * GLO only: width of the offset stream (1 = 1-byte, 0 = 2-byte). GHI has no
+ * SPL only: width of the offset stream (1 = 1-byte, 0 = 2-byte). PAK has no
  * offset stream, so it writes 0 and ignores the field on decode.
  */
 typedef struct {
     uint32_t n_sequences;  // Number of sequences
     uint32_t n_literals;   // Number of literals
     uint8_t enc_lit;       // Literal stream encoding
-    uint8_t enc_tok;       // Token section encoding (GLO only)
+    uint8_t enc_tok;       // Token section encoding (SPL only)
     uint8_t enc_mlen;      // Reserved (see above)
-    uint8_t enc_off;       // Offset stream width (GLO only; ignored on decode in GHI)
+    uint8_t enc_off;       // Offset stream width (SPL only; ignored on decode in PAK)
 } zxc_gnr_header_t;
 
 /**
@@ -1256,37 +1484,48 @@ static ZXC_ALWAYS_INLINE void zxc_store_le64(void* p, const uint64_t v) {
 /**
  * @brief Computes the 1-byte checksum for block headers.
  *
- * Implementation based on Marsaglia's Xorshift (PRNG) principles.
+ * Multiply, then fold from the top. Flipping bit @c i moves the product by exactly
+ * `+/- (ZXC_HASH_GOLDEN64 << i)`, and no shift of that constant leaves 0x00 or 0xFF
+ * in the top byte, so the carry cannot absorb it: every single-bit error is caught,
+ * not merely likely to be. Folding from the top is required - a product's low bits
+ * depend only on the input's low bits.
  *
  * @param[in] p The 8 header bytes to hash.
  * @return The checksum byte.
  */
 static ZXC_ALWAYS_INLINE uint8_t zxc_hash8(const uint8_t* p) {
-    const uint64_t v = zxc_le64(p);
-    uint64_t h = v ^ ZXC_HASH_PRIME1;
-    h ^= h << 13;
-    h ^= h >> 7;
-    h ^= h << 17;
-    return (uint8_t)((h >> 32) ^ h);
+    const uint64_t h = (zxc_le64(p) ^ ZXC_HASH_GOLDEN64) * ZXC_HASH_GOLDEN64;
+
+    return (uint8_t)(h >> 56);
 }
 
 /**
- * @brief Computes the 2-byte checksum for file headers.
+ * @brief Computes the 2-byte checksum for file and dictionary headers.
  *
- * Implementation based on Marsaglia's Xorshift (PRNG) principles.
+ * Two multiplies in a chain: the first half is mixed, the second is added and
+ * mixed again. Every bit flip shifts the result by a fixed amount, and the
+ * constants are such that no 1- or 2-bit error leaves the top halfword
+ * unchanged (proven by the test suite). Summing two products instead let one
+ * bit per half cancel. Order matters: ZXC_HASH_MULT64 inside, ZXC_HASH_GOLDEN64
+ * outside; swapped, 38 bit pairs can cancel.
  *
- * @param[in] p The 16 header bytes to hash.
+ * @param[in] p The 16 header bytes; bytes 14..15 must already be zero.
  * @return The checksum halfword.
  */
 static ZXC_ALWAYS_INLINE uint16_t zxc_hash16(const uint8_t* p) {
-    const uint64_t v1 = zxc_le64(p);
-    const uint64_t v2 = zxc_le64(p + 8);
-    uint64_t h = v1 ^ v2 ^ ZXC_HASH_PRIME2;
-    h ^= h << 13;
-    h ^= h >> 7;
-    h ^= h << 17;
-    const uint32_t res = (uint32_t)((h >> 32) ^ h);
-    return (uint16_t)((res >> 16) ^ res);
+    const uint64_t h1 = (zxc_le64(p) ^ ZXC_HASH_MULT64) * ZXC_HASH_MULT64;
+
+    return (uint16_t)(((h1 + zxc_le64(p + 8) + ZXC_HASH_GOLDEN64) * ZXC_HASH_GOLDEN64) >> 48);
+}
+
+/**
+ * @brief Writes the file header checksum (bytes 14-15) over the other 14 bytes.
+ *
+ * @param[in,out] h The 16-byte file header.
+ */
+static ZXC_ALWAYS_INLINE void zxc_file_header_sign(uint8_t* h) {
+    zxc_store_le16(h + 14, 0);
+    zxc_store_le16(h + 14, zxc_hash16(h));
 }
 
 /**
@@ -1322,14 +1561,15 @@ static ZXC_ALWAYS_INLINE void zxc_copy32(void* dst, const void* src) {
     // AVX2/AVX512: Single 256-bit (32 byte) unaligned load/store
     _mm256_storeu_si256((__m256i*)dst, _mm256_loadu_si256((const __m256i*)src));
 #elif defined(ZXC_USE_SSE2)
-    // SSE2: Two 128-bit (16 byte) unaligned load/stores (no 256-bit regs)
-    _mm_storeu_si128((__m128i*)dst, _mm_loadu_si128((const __m128i*)src));
-    _mm_storeu_si128((__m128i*)((uint8_t*)dst + 16),
-                     _mm_loadu_si128((const __m128i*)((const uint8_t*)src + 16)));
+    const __m128i a = _mm_loadu_si128((const __m128i*)src);
+    const __m128i b = _mm_loadu_si128((const __m128i*)((const uint8_t*)src + 16));
+    _mm_storeu_si128((__m128i*)dst, a);
+    _mm_storeu_si128((__m128i*)((uint8_t*)dst + 16), b);
 #elif defined(ZXC_USE_NEON64) || defined(ZXC_USE_NEON32)
-    // NEON: Two 128-bit (16 byte) unaligned load/stores
-    vst1q_u8((uint8_t*)dst, vld1q_u8((const uint8_t*)src));
-    vst1q_u8((uint8_t*)dst + 16, vld1q_u8((const uint8_t*)src + 16));
+    const uint8x16_t a = vld1q_u8((const uint8_t*)src);
+    const uint8x16_t b = vld1q_u8((const uint8_t*)src + 16);
+    vst1q_u8((uint8_t*)dst, a);
+    vst1q_u8((uint8_t*)dst + 16, b);
 #else
     ZXC_MEMCPY(dst, src, 32);
 #endif
@@ -1395,22 +1635,16 @@ static ZXC_ALWAYS_INLINE int zxc_ctz64(const uint64_t x) {
 #endif
 }
 
-/**
- * @brief Allocates aligned memory (`_aligned_malloc` on Windows, else `posix_memalign`).
- *
- * @param[in] size      Bytes to allocate.
- * @param[in] alignment Power of two, and a multiple of `sizeof(void*)`.
- * @return The block, or NULL on failure. Free it with zxc_aligned_free(), not
- *         `free()`: the Windows allocator is a separate one.
- */
-void* zxc_aligned_malloc(const size_t size, const size_t alignment);
-
-/**
- * @brief Frees a zxc_aligned_malloc() block (`_aligned_free` on Windows, else `free`).
- *
- * @param[in] ptr Block to free; NULL is a no-op.
- */
-void zxc_aligned_free(void* ptr);
+/** @brief Blocks in @p total_decomp bytes of @p block_size: the seek table's entry
+ *  count, which the SEK header's field (table size modulo 2^32) cannot give. */
+static ZXC_ALWAYS_INLINE uint64_t zxc_seek_block_count(const uint64_t total_decomp,
+                                                       const size_t block_size) {
+    // A shift, block_size being a header power of two: no 64-bit division on 32-bit
+    // hosts. Not (total + bs - 1) >> s, which wraps near 2^64 on a forged footer.
+    if (UNLIKELY(!block_size)) return 0;
+    const int s = zxc_ctz32((uint32_t)block_size);
+    return (total_decomp >> s) + ((total_decomp & (block_size - 1)) != 0);
+}
 
 // ============================================================================
 // COMPRESSION CONTEXT & STRUCTS
@@ -1431,12 +1665,12 @@ void zxc_aligned_free(void* ptr);
  *
  * @param[in] input Pointer to the data buffer.
  * @param[in] len Length of the data in bytes.
- * @param[in] seed Previous 32-bit checksum to derive from, or 0 to start fresh.
+ * @param[in] seed 0, a previous 32-bit checksum (zero-extended), or a block index.
  * @param[in] hash_method Checksum algorithm identifier (e.g., ZXC_CHECKSUM_RAPIDHASH).
  * @return The calculated 32-bit hash value.
  */
 static ZXC_ALWAYS_INLINE uint32_t zxc_checksum(const void* RESTRICT input, const size_t len,
-                                               const uint32_t seed, const uint8_t hash_method) {
+                                               const uint64_t seed, const uint8_t hash_method) {
     (void)hash_method; /* single algorithm for now; extend when adding more */
     const uint64_t hash = rapidhash_withSeed(input, len, seed);
 
@@ -1444,22 +1678,36 @@ static ZXC_ALWAYS_INLINE uint32_t zxc_checksum(const void* RESTRICT input, const
 }
 
 /**
- * @brief Folds a block hash into the running global checksum.
+ * @brief Folds a data block's 32-bit checksum into the running archive digest.
  *
- * `result = rotl32(hash, 1) ^ block_hash`. The rotate is what makes the result
- * depend on block order, so a reordered archive fails the global check.
+ * The digest, stored after the source size in the file footer when checksums are
+ * on, is this fold over every block in stream order: an ordered 64-bit identity
+ * of the archive that a reordered or altered block changes. Verified on a full
+ * decode, never on a range read. Seed 0 for the first block.
  *
- * @param[in] hash The current running hash value.
- * @param[in] block_hash The hash of the new block to combine.
- * @return The updated combined hash value.
+ * The checksum is spread across 64 bits, XORed into the accumulator, then
+ * mum-folded (64x64 multiply, XOR of the two 128-bit halves). The result is a 64-bit digest that is
+ * sensitive to the order and content of all blocks.
  */
-static ZXC_ALWAYS_INLINE uint32_t zxc_hash_combine_rotate(const uint32_t hash,
-                                                          const uint32_t block_hash) {
-    return ((hash << 1) | (hash >> 31)) ^ block_hash;
+static ZXC_ALWAYS_INLINE uint64_t zxc_digest_combine(const uint64_t acc,
+                                                     const uint32_t block_checksum) {
+    const uint64_t a = acc ^ ((uint64_t)block_checksum + 1U) * ZXC_HASH_GOLDEN64;
+    const uint64_t b = ZXC_HASH_XORSHIFT64;
+#if defined(__SIZEOF_INT128__)
+    const __uint128_t r = (__uint128_t)a * b;
+    return (uint64_t)r ^ (uint64_t)(r >> 64);
+#else
+    const uint64_t alo = (uint32_t)a, ahi = a >> 32, blo = (uint32_t)b, bhi = b >> 32;
+    const uint64_t lolo = alo * blo, lohi = alo * bhi, hilo = ahi * blo, hihi = ahi * bhi;
+    const uint64_t cross = (lolo >> 32) + (uint32_t)lohi + (uint32_t)hilo;
+    const uint64_t hi = hihi + (lohi >> 32) + (hilo >> 32) + (cross >> 32);
+    const uint64_t lo = (cross << 32) | (uint32_t)lolo;
+    return lo ^ hi;
+#endif
 }
 
 /**
- * @brief Writes a GLO sub-header followed by its section descriptors.
+ * @brief Writes a SPL sub-header followed by its section descriptors.
  *
  * They hold only the two sizes the header cannot imply, and are 0, 4 or 8 bytes
  * wide accordingly.
@@ -1472,12 +1720,12 @@ static ZXC_ALWAYS_INLINE uint32_t zxc_hash_combine_rotate(const uint32_t hash,
  * @return The number of bytes written, or a negative error code if the buffer
  *         is too small.
  */
-int zxc_write_glo_header_and_desc(uint8_t* RESTRICT dst, const size_t rem,
+int zxc_write_spl_header_and_desc(uint8_t* RESTRICT dst, const size_t rem,
                                   const zxc_gnr_header_t* RESTRICT gh, const uint32_t lit_comp,
                                   const uint32_t tok_comp);
 
 /**
- * @brief Reads a GLO sub-header and its section descriptors from a source buffer.
+ * @brief Reads a SPL sub-header and its section descriptors from a source buffer.
  *
  * Sizes absent from the descriptors are reconstructed from the header, so both
  * outputs are always populated.
@@ -1489,34 +1737,34 @@ int zxc_write_glo_header_and_desc(uint8_t* RESTRICT dst, const size_t rem,
  * @param[out] tok_comp Receives the token section's compressed size.
  * @return Bytes consumed (header + table), or a negative zxc_error_t code.
  */
-int zxc_read_glo_header_and_desc(const uint8_t* RESTRICT src, const size_t len,
+int zxc_read_spl_header_and_desc(const uint8_t* RESTRICT src, const size_t len,
                                  zxc_gnr_header_t* RESTRICT gh, uint32_t* RESTRICT lit_comp,
                                  uint32_t* RESTRICT tok_comp);
 
 /**
- * @brief Writes a GHI sub-header. GHI carries no section descriptors.
+ * @brief Writes a PAK sub-header. PAK carries no section descriptors.
  *
  * @param[out] dst Pointer to the destination buffer.
  * @param[in]  rem Remaining size available in the destination buffer.
  * @param[in]  gh  Pointer to the GNR header structure containing header information.
  * @return The number of bytes written, or a negative error code on failure.
  */
-int zxc_write_ghi_header(uint8_t* RESTRICT dst, const size_t rem,
+int zxc_write_pak_header(uint8_t* RESTRICT dst, const size_t rem,
                          const zxc_gnr_header_t* RESTRICT gh);
 
 /**
- * @brief Reads a GHI sub-header from a buffer.
+ * @brief Reads a PAK sub-header from a buffer.
  *
  * @param[in]  src Pointer to the source buffer containing the record data.
  * @param[in]  len Length of the source buffer in bytes.
  * @param[out] gh  Pointer to a zxc_gnr_header_t structure to store the parsed header.
  * @return ZXC_OK on success, or a negative zxc_error_t code on failure.
  */
-int zxc_read_ghi_header(const uint8_t* RESTRICT src, const size_t len,
+int zxc_read_pak_header(const uint8_t* RESTRICT src, const size_t len,
                         zxc_gnr_header_t* RESTRICT gh);
 
 // ============================================================================
-// Huffman codec for the GLO literal stream (level >= 6).
+// Huffman codec for the SPL literal stream (level >= 6).
 //
 // On-disk layout, decoder geometry and tunables: see
 // @ref ZXC_HUF_MAX_CODE_LEN_ULTRA and the surrounding "Huffman Codec Constants"
@@ -1568,13 +1816,15 @@ int zxc_huf_build_code_lengths(const uint32_t* RESTRICT freq, uint8_t* RESTRICT 
  *
  * @param[in]     freq         Frequency table of length `ZXC_HUF_NUM_SYMBOLS`.
  * @param[in,out] code_len     Lengths from ::zxc_huf_build_code_lengths.
- * @param[in]     scratch      Optional ::ZXC_HUF_BUILD_SCRATCH_SIZE scratch for
- *                             the reduced-cap rebuilds (NULL = allocate).
+ * @param[in]     scratch      Optional: the rebuilds' region, plus the workspace
+ *                             when @p scratch_cap reaches ::ZXC_HUF_NUDGE_SCRATCH_SIZE
+ *                             (else the workspace is allocated for the call).
+ * @param[in]     scratch_cap  Bytes at @p scratch.
  * @param[in]     max_code_len Cap the caller built with (level cap).
  * @return 1 if @p code_len was adjusted, 0 if kept.
  */
 int zxc_huf_nudge_code_lengths(const uint32_t* RESTRICT freq, uint8_t* RESTRICT code_len,
-                               void* RESTRICT scratch, int max_code_len);
+                               void* RESTRICT scratch, size_t scratch_cap, int max_code_len);
 
 /**
  * @brief Modeled (bits, level-touches) decode cost of one code-length vector.
@@ -1639,13 +1889,10 @@ int zxc_huf_encode_section(const uint8_t* RESTRICT literals, size_t n_literals,
                            const uint32_t* RESTRICT freq, const uint8_t* RESTRICT code_len,
                            uint8_t* RESTRICT dst, size_t dst_cap);
 
-/** @brief Unpack a dict table's 128-byte packed lengths and prebuild its PivCo
- *  tree, canonical codes, code lengths and decoder tables (tree-at-attach).
- *  All outputs are frame-constant; per-block encode/estimate/decode then skip
- *  the rebuild. */
+/** @brief Unpack a dict table's packed lengths and prebuild its tree, codes and
+ *  code lengths, once per frame. */
 int zxc_huf_dict_tree_build(const uint8_t* RESTRICT packed_lengths, zxc_pivco_tree_t* RESTRICT tree,
-                            uint32_t* RESTRICT codes, uint8_t* RESTRICT code_len,
-                            zxc_pivco_decode_aux_t* RESTRICT aux);
+                            uint32_t* RESTRICT codes, uint8_t* RESTRICT code_len);
 
 /** @brief zxc_huf_calc_size for a dict section: prebuilt @p tree, no header. */
 size_t zxc_huf_calc_size_dict(const uint32_t* RESTRICT freq, const uint8_t* RESTRICT code_len,
@@ -1663,13 +1910,10 @@ int zxc_huf_encode_section_dict(const uint8_t* RESTRICT literals, size_t n_liter
 int zxc_huf_decode_section(const uint8_t* RESTRICT payload, size_t payload_size,
                            uint8_t* RESTRICT dst, size_t n, uint8_t* RESTRICT scratch);
 
-/** @brief Decode a PivCo dict section against a prebuilt dict @p tree and its
- *  attach-time decoder tables @p aux. */
+/** @brief Decode a PivCo dict section against a prebuilt dict @p tree. */
 int zxc_huf_decode_section_dict(const uint8_t* RESTRICT payload, size_t payload_size,
                                 uint8_t* RESTRICT dst, size_t n,
-                                const zxc_pivco_tree_t* RESTRICT tree,
-                                const zxc_pivco_decode_aux_t* RESTRICT aux,
-                                uint8_t* RESTRICT scratch);
+                                const zxc_pivco_tree_t* RESTRICT tree, uint8_t* RESTRICT scratch);
 
 // ---------------------------------------------------------------------------
 // Compression / decompression context.
@@ -1710,14 +1954,16 @@ typedef struct {
     uint8_t* buf_tokens;     /**< Buffer for token sequences. */
     uint16_t* buf_offsets;   /**< Buffer for offsets. */
     uint8_t* buf_extras;     /**< Buffer for extra lengths (vbytes for LL/ML). */
-    uint8_t* literals;       /**< Buffer for literal bytes. */
+    uint8_t* buf_split;      /**< Match-splitting scratch, one byte per sequence. */
+    zxc_spl_match_split_hist_t* buf_split_hist; /**< Match-splitting escape histograms. */
+    uint8_t* literals;                          /**< Buffer for literal bytes. */
 
     // Cold zone: configuration / scratch / resizeable.
     uint8_t* lit_buffer;            /**< Scratch buffer for literals (RLE / Huffman). */
     size_t lit_buffer_cap;          /**< Current capacity of the scratch buffer. */
     uint8_t* work_buf;              /**< Padded scratch buffer for buffer-API decompression. */
     size_t work_buf_cap;            /**< Capacity of the work buffer. */
-    uint8_t* tok_buffer;            /**< Decode scratch for a Huffman-coded GLO token
+    uint8_t* tok_buffer;            /**< Decode scratch for a Huffman-coded SPL token
                                          section (enc_tok == HUFFMAN); NULL on compress.
                                          Heap decode contexts defer it (with pivco_scratch)
                                          to the first entropy section, see entropy_block. */
@@ -1730,8 +1976,8 @@ typedef struct {
                                          Freed by zxc_cctx_free. */
     uint8_t* opt_scratch;           /**< Optimal-parser DP scratch (level >= 6 only,
                                          lazy-allocated, packs dp/parent_len/parent_off/actions).
-                                         Also reused as transient scratch for the
-                                         length-limited Huffman code-length builder. */
+                                         Also the Huffman code-length builder's and
+                                         nudge's scratch (::ZXC_HUF_NUDGE_SCRATCH_SIZE). */
     size_t opt_scratch_cap;         /**< Current capacity of opt_scratch in bytes. */
     int checksum_enabled;           /**< 1 if checksum calculation/verification is enabled. */
     int compression_level;          /**< Compression level. */
@@ -1744,7 +1990,7 @@ typedef struct {
                                          dict_size > 0 (NULL otherwise); built once by
                                          zxc_cctx_attach_dict_huf. Valid iff dict_huf_tree_ok. */
     int dict_huf_tree_ok;           /**< 1 when *dict_huf is built and valid. */
-    uint32_t* lit_freq_acc;         /**< Trainer hook: when non-NULL, the GLO encoder
+    uint32_t* lit_freq_acc;         /**< Trainer hook: when non-NULL, the SPL encoder
                                          accumulates post-LZ literal byte frequencies here
                                          (256 entries). NULL outside dictionary training. */
 
@@ -1779,9 +2025,8 @@ int zxc_cctx_init(zxc_cctx_t* ctx, const size_t chunk_size, const int mode, cons
 /**
  * @brief Attach the shared dictionary literal table to an initialised context.
  *
- * Validates the 128-byte packed code-lengths header and builds the PivCo tree,
- * canonical codes and decoder tables ONCE into the context (tree-at-attach);
- * per-block encode/estimate/decode reuse them. @p lengths need only be valid
+ * Validates the 128-byte packed code-lengths header and builds the PivCo tree
+ * and codes once into the context, for every block to reuse. @p lengths need only be valid
  * during this call (everything is copied into the context workspace). A NULL
  * @p lengths is a no-op.
  *
@@ -1874,18 +2119,24 @@ void zxc_cctx_free(zxc_cctx_t* ctx);
  * `_avx2`, `_avx512`, ...), running the one-time CPU detection on the first
  * call, and routes to the dict variant when the context carries a dictionary.
  *
- * @param[in]  ctx     Context holding the decode state and dictionary, if any.
- * @param[in]  src     Compressed chunk.
- * @param[in]  src_sz  Size of @p src in bytes.
- * @param[out] dst     Destination buffer.
- * @param[in]  dst_cap Capacity of @p dst.
+ * @param[in]  ctx         Context holding the decode state and dictionary, if any.
+ * @param[in]  src         Compressed chunk.
+ * @param[in]  src_sz      Size of @p src in bytes.
+ * @param[out] dst         Destination buffer.
+ * @param[in]  dst_cap     Capacity of @p dst.
+ * @param[in]  block_index Frame position of the block: checksum seed, 0 for the block API.
  * @return Bytes decoded (> 0), or a negative @ref zxc_error_t.
  */
 int zxc_decompress_chunk_wrapper(const zxc_cctx_t* RESTRICT ctx, const uint8_t* RESTRICT src,
-                                 const size_t src_sz, uint8_t* RESTRICT dst, const size_t dst_cap);
+                                 const size_t src_sz, uint8_t* RESTRICT dst, const size_t dst_cap,
+                                 const uint64_t block_index);
 int zxc_decompress_chunk_wrapper_dict(const zxc_cctx_t* RESTRICT ctx, const uint8_t* RESTRICT src,
                                       const size_t src_sz, uint8_t* RESTRICT dst,
-                                      const size_t dst_cap);
+                                      const size_t dst_cap, const uint64_t block_index);
+/** @brief Exact-capacity variant for the safe block API; dispatch table only. */
+int zxc_decompress_chunk_wrapper_safe(const zxc_cctx_t* RESTRICT ctx, const uint8_t* RESTRICT src,
+                                      const size_t src_sz, uint8_t* RESTRICT dst,
+                                      const size_t dst_cap, const uint64_t block_index);
 
 /**
  * @brief Compresses one chunk through the runtime ISA dispatch.
@@ -1893,15 +2144,26 @@ int zxc_decompress_chunk_wrapper_dict(const zxc_cctx_t* RESTRICT ctx, const uint
  * Counterpart of zxc_decompress_chunk_wrapper(): same lazily-resolved variant
  * pointer, same one-time CPU detection on the first call.
  *
- * @param[in,out] ctx     Compression context: configuration and working buffers.
- * @param[in]     src     Raw data to compress.
- * @param[in]     src_sz  Size of @p src in bytes.
- * @param[out]    dst     Destination buffer.
- * @param[in]     dst_cap Capacity of @p dst.
+ * @param[in,out] ctx         Compression context: configuration and working buffers.
+ * @param[in]     src         Raw data to compress.
+ * @param[in]     src_sz      Size of @p src in bytes.
+ * @param[out]    dst         Destination buffer.
+ * @param[in]     dst_cap     Capacity of @p dst.
+ * @param[in]     block_index Frame position of the block: checksum seed, 0 for the block API.
  * @return Bytes written (> 0), or a negative @ref zxc_error_t.
  */
 int zxc_compress_chunk_wrapper(zxc_cctx_t* RESTRICT ctx, const uint8_t* RESTRICT src,
-                               const size_t src_sz, uint8_t* RESTRICT dst, const size_t dst_cap);
+                               const size_t src_sz, uint8_t* RESTRICT dst, const size_t dst_cap,
+                               const uint64_t block_index);
+
+/** @brief @ref zxc_compress_block, its checksum seeded with @p block_index (public entry: 0). */
+int64_t zxc_compress_block_at(zxc_cctx* cctx, const void* RESTRICT src, size_t src_size,
+                              void* RESTRICT dst, size_t dst_capacity, const zxc_cparams_t* opts,
+                              uint64_t block_index);
+
+/** @brief Parameters a public context carries, for the FILE* and push paths. */
+const zxc_cparams_t* zxc_cctx_params(const zxc_cctx* cctx);
+const zxc_dparams_t* zxc_dctx_params(const zxc_dctx* dctx);
 
 // ---------------------------------------------------------------------------
 // Internal frame primitives.
@@ -1936,12 +2198,13 @@ typedef struct {
  * @param[in]  chunk_size    Block size to encode in the header.
  * @param[in]  has_checksum  Non-zero if the checksum bit must be set.
  * @param[in]  dict_id       Dictionary ID (0 = no dictionary).
+ * @param[in]  has_seek      Non-zero if the archive will carry a SEK block.
  *
  * @return Number of bytes written (@c ZXC_FILE_HEADER_SIZE) on success,
  *         or @c ZXC_ERROR_DST_TOO_SMALL if @p dst_capacity is insufficient.
  */
 int zxc_write_file_header(uint8_t* RESTRICT dst, const size_t dst_capacity, const size_t chunk_size,
-                          const int has_checksum, const uint32_t dict_id);
+                          const int has_checksum, const uint32_t dict_id, const int has_seek);
 
 /**
  * @brief Validates and reads the ZXC file header from @p src.
@@ -1957,13 +2220,104 @@ int zxc_write_file_header(uint8_t* RESTRICT dst, const size_t dst_capacity, cons
  *                               flag. May be @c NULL.
  * @param[out] out_dict_id       Optional pointer that receives the dictionary
  *                               ID (0 if none). May be @c NULL.
+ * @param[out] out_has_seek      Optional pointer that receives the seek-table
+ *                               flag. May be @c NULL.
  *
  * @return @c ZXC_OK on success, or a negative error code (e.g.
  *         @c ZXC_ERROR_SRC_TOO_SMALL, @c ZXC_ERROR_BAD_MAGIC,
  *         @c ZXC_ERROR_BAD_VERSION).
  */
 int zxc_read_file_header(const uint8_t* RESTRICT src, const size_t src_size, size_t* out_block_size,
-                         int* out_has_checksum, uint32_t* out_dict_id);
+                         int* out_has_checksum, uint32_t* out_dict_id, int* out_has_seek);
+
+/** @brief The verdict on @p n bytes too short for a frame: the header speaks first,
+ *  then @ref ZXC_ERROR_SRC_TOO_SMALL. */
+static inline int zxc_short_input_verdict(const uint8_t* p, const size_t n) {
+    size_t chunk = 0;
+    const int rc = zxc_read_file_header(p, n < ZXC_FILE_HEADER_SIZE ? n : ZXC_FILE_HEADER_SIZE,
+                                        &chunk, NULL, NULL, NULL);
+    return rc != ZXC_OK ? rc : ZXC_ERROR_SRC_TOO_SMALL;
+}
+
+// ---------------------------------------------------------------------------
+// Container scan: frames back to back, measured without decoding (FORMAT.md,
+// Sec 2.1).
+// ---------------------------------------------------------------------------
+
+/**
+ * @struct zxc_scan_src_t
+ * @brief Where a container scan reads from: memory, or a positioned callback
+ *        (the FILE* size query). Offsets are relative to the container start.
+ */
+typedef struct zxc_scan_src_s {
+    /** Reads @p len bytes at @p off; NULL reads from @c data. Returns
+     *  @ref ZXC_OK or a negative @ref zxc_error_t. Bounds are checked first. */
+    int (*read_at)(const struct zxc_scan_src_s* src, uint64_t off, void* dst, size_t len);
+    const uint8_t* data; /**< Container bytes when @c read_at is NULL. */
+    void* ctx;           /**< Opaque state for @c read_at. */
+    uint64_t size;       /**< Container size in bytes. */
+} zxc_scan_src_t;
+
+/** @brief A scan source over @p size bytes of memory at @p data. */
+static ZXC_ALWAYS_INLINE zxc_scan_src_t zxc_scan_src_mem(const uint8_t* data, const size_t size) {
+    zxc_scan_src_t src = {NULL, data, NULL, (uint64_t)size};
+    return src;
+}
+
+/** @brief What @ref zxc_scan_container learns about a container. */
+typedef struct {
+    uint64_t dsize;         /**< Sum of the stored decompressed sizes. */
+    uint64_t frames;        /**< ZXC frames. */
+    uint32_t first_dict_id; /**< Dictionary id of the first frame, 0 without one. */
+    int uses_dict;          /**< A frame bound to a dictionary. */
+} zxc_container_info_t;
+
+/**
+ * @brief Tells whether a frame starts at @p pos.
+ *
+ * A wrong magic word is @ref ZXC_ERROR_BAD_MAGIC at offset 0, as for a single
+ * frame, and @ref ZXC_ERROR_CORRUPT_DATA after one.
+ *
+ * @param[in] src  Container source.
+ * @param[in] pos  Offset just past the previous frame, 0 for the first.
+ * @return 1 on a frame, 0 at the end of the input, or a negative @ref zxc_error_t.
+ */
+int zxc_container_next(const zxc_scan_src_t* src, uint64_t pos);
+
+#ifndef ZXC_NO_FRAME_API
+/**
+ * @brief Measures the frame ending at @p end without decoding: its footer's
+ *        compressed size gives where it starts.
+ *
+ * @param[in]  src   Container source.
+ * @param[in]  end   Offset just past the frame.
+ * @param[out] start Offset of the frame's header.
+ * @param[out] info  Its header and footer, checked like zxc_get_frame_info().
+ * @param[out] footer_len Footer bytes, digest included; may be NULL.
+ * @return @ref ZXC_OK, or a negative @ref zxc_error_t.
+ */
+int zxc_scan_frame(const zxc_scan_src_t* src, uint64_t end, uint64_t* start, zxc_frame_info_t* info,
+                   size_t* footer_len);
+
+/**
+ * @brief The frame that must span all of @p src: zxc_get_frame_info() and its
+ *        FILE* twin. The header speaks first, then @ref zxc_scan_frame; a frame
+ *        starting past offset 0 is @ref ZXC_ERROR_CORRUPT_DATA.
+ */
+int zxc_scan_whole_frame(const zxc_scan_src_t* src, zxc_frame_info_t* info, size_t* footer_len);
+#endif /* ZXC_NO_FRAME_API */
+
+/**
+ * @brief Measures a whole container without decoding: frames from the last back
+ *        to the first through @ref zxc_scan_frame.
+ *
+ * @param[in]  src       Container source.
+ * @param[in]  req_chunk Block size every frame must declare, 0 for any.
+ * @param[out] info      Totals over the container.
+ * @return @ref ZXC_OK, or a negative @ref zxc_error_t; an empty container is
+ *         @ref ZXC_ERROR_SRC_TOO_SMALL.
+ */
+int zxc_scan_container(const zxc_scan_src_t* src, size_t req_chunk, zxc_container_info_t* info);
 
 /**
  * @brief Encodes a block header into @p dst.
@@ -1993,30 +2347,231 @@ int zxc_write_block_header(uint8_t* RESTRICT dst, const size_t dst_capacity,
  * @param[in]  src_size  Size of @p src in bytes.
  * @param[out] bh        Block header structure populated with the parsed data.
  *
- * @return @c ZXC_OK on success, or @c ZXC_ERROR_SRC_TOO_SMALL if @p src is
- *         smaller than @c ZXC_BLOCK_HEADER_SIZE.
+ * @return @c ZXC_OK on success, @c ZXC_ERROR_SRC_TOO_SMALL if @p src is
+ *         smaller than @c ZXC_BLOCK_HEADER_SIZE, or @c ZXC_ERROR_BAD_HEADER on a
+ *         bad checksum or non-zero Block Flags / Reserved.
  */
 int zxc_read_block_header(const uint8_t* RESTRICT src, const size_t src_size,
                           zxc_block_header_t* bh);
 
 /**
- * @brief Writes the ZXC file footer into @p dst.
+ * @name File footer
+ * @brief `[digest(8), with checksums] | original_size | compressed_size | L` (FORMAT.md Sec 8).
  *
- * The footer stores the original uncompressed size and an optional global
- * checksum. It is always @c ZXC_FILE_FOOTER_SIZE (12) bytes long.
- *
- * @param[out] dst               Destination buffer.
- * @param[in]  dst_capacity      Total capacity of @p dst in bytes.
- * @param[in]  src_size          Original uncompressed size of the data.
- * @param[in]  global_hash       Global checksum hash (used only when
- *                               @p checksum_enabled is non-zero).
- * @param[in]  checksum_enabled  Non-zero if the checksum should be emitted.
- *
- * @return Number of bytes written (@c ZXC_FILE_FOOTER_SIZE) on success,
- *         or @c ZXC_ERROR_DST_TOO_SMALL on failure.
+ * Sizes on the fewest little-endian bytes (1 to 8); L = (nd - 1) | (nf - 1) << 4
+ * gives their lengths, so the footer parses back from the end without the
+ * header. A sequential reader computes the one valid footer and compares.
+ * @{
  */
-int zxc_write_file_footer(uint8_t* RESTRICT dst, const size_t dst_capacity, const uint64_t src_size,
-                          const uint32_t global_hash, const int checksum_enabled);
+
+/** @brief Fewest little-endian bytes, 1 to 8, that hold @p v. */
+static ZXC_ALWAYS_INLINE size_t zxc_uint_bytes(const uint64_t v) {
+    size_t n = 1;
+    while (n < sizeof(uint64_t) && (v >> (8 * n)) != 0) n++;
+    return n;
+}
+
+/** @brief Where a frame's footer lies, from what precedes it. */
+typedef struct {
+    size_t skip;              /**< Digest bytes ahead of the sizes, 0 or 8. */
+    size_t nd;                /**< Bytes of original_size. */
+    size_t nf;                /**< Bytes of compressed_size. */
+    size_t len;               /**< Footer bytes, digest included. */
+    uint64_t compressed_size; /**< The frame's bytes, footer included. */
+} zxc_footer_layout_t;
+
+/**
+ * @brief The footer of a frame whose first @p prefix bytes precede it.
+ *
+ * compressed_size counts its own bytes: nf is the fewest that hold the total, a
+ * unique choice both ends derive.
+ */
+static ZXC_ALWAYS_INLINE zxc_footer_layout_t zxc_footer_layout(const uint64_t prefix,
+                                                               const uint64_t src_size,
+                                                               const int checksum_enabled) {
+    zxc_footer_layout_t l;
+    l.skip = checksum_enabled ? (size_t)ZXC_FILE_DIGEST_SIZE : 0U;
+    l.nd = zxc_uint_bytes(src_size);
+    const uint64_t base = prefix + l.skip + l.nd + 1;
+    l.nf = 1;
+    while (zxc_uint_bytes(base + l.nf) > l.nf) l.nf++;
+    l.compressed_size = base + l.nf;
+    l.len = l.skip + l.nd + l.nf + 1;
+    return l;
+}
+
+/**
+ * @brief Writes the footer of a frame whose first @p prefix bytes precede it.
+ *
+ * @return Bytes written (@ref ZXC_FILE_FOOTER_MIN_SIZE to
+ *         @ref ZXC_FILE_FOOTER_MAX_SIZE, plus the digest when
+ *         @p checksum_enabled), or @c ZXC_ERROR_DST_TOO_SMALL.
+ */
+int zxc_write_file_footer(uint8_t* RESTRICT dst, const size_t dst_capacity, const uint64_t prefix,
+                          const uint64_t src_size, const uint64_t digest,
+                          const int checksum_enabled);
+
+/**
+ * @brief Checks the footer a sequential reader reaches against @p l, the one
+ *        the frame implies, on the @p avail bytes it has.
+ *
+ * Compares only the bytes present: a mismatch is corruption, a matching but
+ * short prefix a truncation.
+ *
+ * @param[in]  footer   The footer bytes read so far.
+ * @param[in]  avail    How many there are.
+ * @param[in]  l        The layout the frame implies.
+ * @param[in]  src_size The decompressed size the footer must store.
+ * @param[out] digest   The stored digest, 0 without checksums; may be NULL.
+ * @return @ref ZXC_OK, @ref ZXC_ERROR_CORRUPT_DATA or @ref ZXC_ERROR_SRC_TOO_SMALL.
+ */
+int zxc_check_file_footer(const uint8_t* footer, size_t avail, const zxc_footer_layout_t* l,
+                          uint64_t src_size, uint64_t* digest);
+
+/**
+ * @brief Parses the sizes back from the end of a frame.
+ *
+ * @param[in]  end             One past the frame's last byte.
+ * @param[in]  avail           Bytes readable before @p end.
+ * @param[out] src_size        Stored original size.
+ * @param[out] compressed_size Stored compressed size of the frame.
+ * @param[out] sizes_len       Bytes of the two sizes and L; the digest, when
+ *                             the header announces one, precedes them.
+ * @return @ref ZXC_OK, @ref ZXC_ERROR_SRC_TOO_SMALL, or
+ *         @ref ZXC_ERROR_CORRUPT_DATA for a malformed lengths byte or a
+ *         non-minimal length.
+ */
+int zxc_parse_file_footer(const uint8_t* end, size_t avail, uint64_t* src_size,
+                          uint64_t* compressed_size, size_t* sizes_len);
+
+/** @brief Most bytes a footer spans: the digest and the two longest sizes. */
+#define ZXC_FOOTER_MAX_SIZE_WITH_DIGEST (ZXC_FILE_DIGEST_SIZE + ZXC_FILE_FOOTER_MAX_SIZE)
+
+/** @brief Smallest frame: header, the EOF block and the shortest footer. */
+#define ZXC_FRAME_MIN_SIZE (ZXC_FILE_HEADER_SIZE + ZXC_BLOCK_HEADER_SIZE + ZXC_FILE_FOOTER_MIN_SIZE)
+
+/** @brief Bytes zxc_read_frame_info() takes from the end of @p total bytes (at
+ *  least @ref ZXC_FRAME_MIN_SIZE): all of them past the header and EOF block, up
+ *  to @ref ZXC_FOOTER_MAX_SIZE_WITH_DIGEST. */
+static inline size_t zxc_frame_tail_len(const uint64_t total) {
+    const uint64_t body = total - (ZXC_FILE_HEADER_SIZE + ZXC_BLOCK_HEADER_SIZE);
+    return body < ZXC_FOOTER_MAX_SIZE_WITH_DIGEST ? (size_t)body : ZXC_FOOTER_MAX_SIZE_WITH_DIGEST;
+}
+
+#ifndef ZXC_NO_FRAME_API
+/**
+ * @brief Validates a frame from its header and the end of its bytes: the one
+ *        check behind zxc_get_frame_info(), its FILE* twin and the size queries.
+ *
+ * @param[in]  header     The first @ref ZXC_FILE_HEADER_SIZE bytes.
+ * @param[in]  tail       The last @p tail_len bytes of the input.
+ * @param[in]  tail_len   @ref zxc_frame_tail_len of @p total.
+ * @param[in]  total      Bytes of the whole input.
+ * @param[out] info       Filled on success.
+ * @param[out] footer_len Footer bytes, digest included; may be NULL.
+ * @return @ref ZXC_OK, or a negative @ref zxc_error_t.
+ */
+int zxc_read_frame_info(const uint8_t* header, const uint8_t* tail, size_t tail_len, uint64_t total,
+                        zxc_frame_info_t* info, size_t* footer_len);
+
+/** @brief Copies the fields of @p got that fit the caller's @p info_size bytes. */
+static ZXC_ALWAYS_INLINE void zxc_frame_info_copy(zxc_frame_info_t* info, const size_t info_size,
+                                                  const zxc_frame_info_t* got) {
+    ZXC_MEMCPY(info, got, info_size < sizeof(*got) ? info_size : sizeof(*got));
+}
+#endif /* ZXC_NO_FRAME_API */
+/** @} */
+
+/**
+ * @brief Whether a footer's decompressed size is reachable for this archive.
+ *
+ * The footer is untrusted and its size becomes the caller's allocation, so it is
+ * capped by what the archive could physically hold: every block costs at least
+ * @ref ZXC_BLOCK_HEADER_SIZE compressed bytes and decodes to at most one block
+ * size. The cap also keeps @ref zxc_inplace_margin's block count from
+ * overflowing. Every reader that sizes anything from the footer goes through it.
+ *
+ * @param[in] dsize      Decompressed size read from the footer.
+ * @param[in] chunk_size Block size from the file header; never 0 after a
+ *                       @ref ZXC_OK from @ref zxc_read_file_header.
+ * @param[in] comp_size  Size of the whole archive in bytes.
+ * @return 1 when @p dsize is reachable, 0 for a forged footer.
+ */
+static ZXC_ALWAYS_INLINE int zxc_footer_dsize_plausible(const uint64_t dsize,
+                                                        const size_t chunk_size,
+                                                        const uint64_t comp_size) {
+    return zxc_seek_block_count(dsize, chunk_size) <= comp_size / ZXC_BLOCK_HEADER_SIZE;
+}
+
+/**
+ * @brief Writes a seek table's block header for @p num_blocks entries.
+ *
+ * Shared by the writers and by the readers, which compare against it.
+ *
+ * @param[out] dst          Destination, at least @ref ZXC_BLOCK_HEADER_SIZE bytes.
+ * @param[in]  dst_capacity Size of @p dst.
+ * @param[in]  num_blocks   Blocks the table indexes.
+ * @return @ref ZXC_BLOCK_HEADER_SIZE, or a negative @ref zxc_error_t.
+ */
+int zxc_seek_table_header(uint8_t* dst, size_t dst_capacity, uint64_t num_blocks);
+
+/**
+ * @brief Checks an EOF block header against its one valid form: type 255, every
+ *        other field zero, and its header checksum.
+ *
+ * @param[in] hdr The 8 header bytes, already read as an EOF block.
+ * @return @ref ZXC_OK or @ref ZXC_ERROR_BAD_HEADER.
+ */
+int zxc_check_eof_header(const uint8_t* hdr);
+
+/**
+ * @brief Checks the SEK block header the file header announced, on the @p avail
+ *        bytes present.
+ *
+ * A frame admits one header, the one zxc_seek_table_header() writes (reserved
+ * bytes zero), compared like the footer. A short footer never matches its start,
+ * so a flag set without a table reads as corrupt, not truncated.
+ *
+ * @param[in]  hdr        Bytes after the EOF block.
+ * @param[in]  avail      How many of them are present.
+ * @param[in]  total_out  Bytes the frame decoded to.
+ * @param[in]  block_size Block size from the file header.
+ * @param[out] sek_bytes  Table length in 64 bits (the field only holds its fold);
+ *                        may be NULL.
+ * @return @ref ZXC_OK, @ref ZXC_ERROR_CORRUPT_DATA or @ref ZXC_ERROR_SRC_TOO_SMALL.
+ */
+int zxc_check_seek_header(const uint8_t* hdr, size_t avail, uint64_t total_out, size_t block_size,
+                          uint64_t* sek_bytes);
+
+// ---------------------------------------------------------------------------
+// Seekable cross-TU hooks (defined in zxc_seekable.c, consumed by the
+// FILE*-flavored open helper in zxc_driver.c).
+// -------------------------------------------------------------------------
+
+/**
+ * @brief Hands ownership of a heap-allocated reader context to a seekable
+ *        handle.  The context will be released via @c ZXC_FREE when
+ *        @ref zxc_seekable_free is called on @p s.
+ *
+ * Safe to call exactly once per handle.  Intended for thin wrappers that
+ * build a @ref zxc_reader_t over their own allocated state
+ * (@ref zxc_seekable_open_file) and need that state to outlive the call
+ * site.
+ *
+ * @param[in,out] s    Seekable handle returned by @ref zxc_seekable_open_reader.
+ * @param[in]     ctx  Pointer previously returned by @c ZXC_MALLOC / @c ZXC_CALLOC.
+ */
+#ifndef ZXC_NO_FRAME_API
+void zxc_seekable_attach_owned_ctx(zxc_seekable* s, void* ctx);
+#endif /* ZXC_NO_FRAME_API */
+
+/**
+ * @brief Writes one group (@p *anchor, then @p cnt sizes) into @p dst, which holds
+ *        ZXC_SEEK_GROUP_BYTES, and advances @p *anchor past its blocks.
+ * @return Bytes written.
+ */
+size_t zxc_seek_write_group(uint8_t* RESTRICT dst, uint64_t* RESTRICT anchor,
+                            const uint32_t* RESTRICT sizes, uint32_t cnt);
 
 /** @} */ /* end of internal */
 

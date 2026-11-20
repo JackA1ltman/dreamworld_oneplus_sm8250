@@ -1,7 +1,7 @@
 /*
  * Cryptographic API.
  *
- * ZXC compression algorithm (kernel port of upstream libzxc 0.14.1).
+ * ZXC compression algorithm (kernel port of upstream libzxc 1.0.1).
  *
  * Wraps the block-level API exported by lib/zxc (see include/linux/zxc.h) in
  * the standard Crypto API compress / scompress interfaces, so any Crypto API
@@ -26,7 +26,7 @@
 
 /*
  * The context holds the two opaque reusable handles the block API needs. They
- * are created lazily (NULL opts), so the compression context sizes its
+ * are created with default parameters, so the compression context sizes its
  * internal buffers on first use from the actual input size, and is reused
  * across calls of the same size (e.g. PAGE_SIZE pages from zram/zswap).
  */
@@ -45,7 +45,7 @@ static void zxc_release_ctx(struct zxc_ctx *ctx)
 
 static int zxc_init_ctx(struct zxc_ctx *ctx)
 {
-	ctx->cctx = zxc_create_cctx(NULL);
+	ctx->cctx = zxc_create_cctx();
 	if (!ctx->cctx)
 		return -ENOMEM;
 
@@ -104,8 +104,8 @@ static int __zxc_compress(const u8 *src, unsigned int slen,
 {
 	int64_t out_len;
 
-	/* NULL opts: reuse the level/block_size/checksum pinned in the context. */
-	out_len = zxc_compress_block(ctx->cctx, src, slen, dst, *dlen, NULL);
+	/* Reuse the context's default level/block_size/checksum parameters. */
+	out_len = zxc_compress_block(ctx->cctx, src, slen, dst, *dlen);
 	if (out_len < 0)
 		return -EINVAL;
 
@@ -138,7 +138,7 @@ static int __zxc_decompress(const u8 *src, unsigned int slen,
 	 * PAGE_SIZE zram page) and must not be written past its end; the wild-copy
 	 * fast path of the regular block decoder needs a tail pad we do not have.
 	 */
-	out_len = zxc_decompress_block_safe(ctx->dctx, src, slen, dst, *dlen, NULL);
+	out_len = zxc_decompress_block_safe(ctx->dctx, src, slen, dst, *dlen);
 	if (out_len < 0)
 		return -EINVAL;
 

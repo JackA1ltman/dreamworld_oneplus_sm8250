@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * rapidhash V3 - Very fast, high quality, platform-independent hashing algorithm.
  *
@@ -32,6 +33,7 @@
 /*
  *  Includes.
  */
+/* backport for 4.19: use kernel types and string headers instead of libc headers. */
  #include <linux/types.h>
  #include <linux/string.h>
  #if defined(_MSC_VER)

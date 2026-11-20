@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# ZXC compression library (kernel port of upstream 0.14.1).
+# ZXC compression library (kernel port of upstream 1.0.1).
 #
 # Global flags:
 #   -DZXC_STATIC_DEFINE      No shared-library export attributes.
@@ -23,7 +23,10 @@
 
 ccflags-y += -DZXC_STATIC_DEFINE -DZXC_DISABLE_SIMD -DZXC_NO_FRAME_API
 ccflags-y += -std=gnu11
-ccflags-y += -Wno-declaration-after-statement -Wno-gcc-compat
+ccflags-y += -Wno-declaration-after-statement $(call cc-option,-Wno-gcc-compat,)
+# Upstream kernel Kbuild raises frame-warn limit: zxc_encode_block_spl (~5968 B)
+# and zxc_pivco_encode_core (~4120 B) exceed CONFIG_FRAME_WARN (2048/4096 B).
+ccflags-y += -Wframe-larger-than=8192
 
 CFLAGS_zxc_compress.o := -DZXC_FUNCTION_SUFFIX=_default
 CFLAGS_zxc_decompress.o := -DZXC_FUNCTION_SUFFIX=_default

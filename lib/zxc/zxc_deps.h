@@ -1,105 +1,87 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * ZXC - High-performance lossless compression
  *
- * Copyright (c) 2025-2026 Bertrand Lebonnois and contributors.
- * SPDX-License-Identifier: BSD-3-Clause
- */
-
-/**
- * @file zxc_deps.h
- * @brief Linux-kernel build of the ZXC libc-dependency override point.
- *
- * The core compression/decompression code only ever reaches the standard
- * library through the macros and headers declared here.  This file replaces
- * the stock (hosted) version shipped with libzxc: it substitutes the kernel's
- * own headers, maps ZXC_MALLOC / ZXC_FREE / ... onto the slab allocator, and
- * provides the few C-library constants the kernel headers do not define.
+ * Copyright (c) Bertrand Lebonnois and contributors.
  */
 
 #ifndef ZXC_DEPS_H
 #define ZXC_DEPS_H
 
+#include <linux/bitops.h>
+#include <linux/build_bug.h>
 #include <linux/kernel.h>
 #include <linux/limits.h>
+#include <linux/mm.h>
+#include <linux/overflow.h>
+#include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
 
-/**
- * @name C Library Constants Missing From Kernel Headers
- * @{
- * The kernel's <linux/limits.h> only defines the U8/U16/U32/U64_MAX family.
- * The ZXC sources reference the libc spellings (and CHAR_BIT), so provide the
- * few missing ones.
- */
+/* backport for 4.19: <linux/build_bug.h> defines static_assert from 5.1 only; the module builds as gnu11. */
+#ifndef static_assert
+#define static_assert(expr, msg) _Static_assert(expr, msg)
+#endif
+
+/* backport for 4.19: the kernel has no <stdatomic.h> in its include path; force volatile fallback. */
+#ifndef ZXC_USE_C11_ATOMICS
+#define ZXC_USE_C11_ATOMICS 0
+#endif
+
+// zxc spells these the libc way; the kernel ships U*_MAX.
 #ifndef CHAR_BIT
 #define CHAR_BIT 8
 #endif
 #ifndef UINT16_MAX
-#define UINT16_MAX ((uint16_t)~0U)
+#define UINT16_MAX U16_MAX
 #endif
 #ifndef UINT32_MAX
-#define UINT32_MAX ((uint32_t)~0U)
+#define UINT32_MAX U32_MAX
 #endif
 #ifndef UINT64_MAX
-#define UINT64_MAX ((uint64_t)~0ULL)
+#define UINT64_MAX U64_MAX
 #endif
-/** @} */
 
-/**
- * @name C11 Atomics
- * @brief The kernel has no <stdatomic.h> in its include path.  Force the
- *        library's volatile fallback for the lazy function-pointer dispatcher
- *        (a benign race: every writer stores the same constant).
- * @{
- */
-#ifndef ZXC_USE_C11_ATOMICS
-#define ZXC_USE_C11_ATOMICS 0
-#endif
-/** @} */
+// Without FP/SIMD the popcount builtins are unexported libgcc calls.
+#define ZXC_POPCOUNT32(v) hweight32(v)
+#define ZXC_POPCOUNT64(v) hweight64(v)
 
-/**
- * @name Heap Allocator Abstraction
- * @brief Map the library's allocator macros onto the kernel slab allocator.
- * @{
- */
-#define ZXC_MALLOC(size) kmalloc((size), GFP_KERNEL)
-#define ZXC_CALLOC(nmemb, size) kcalloc((nmemb), (size), GFP_KERNEL)
-#define ZXC_REALLOC(ptr, size) krealloc((ptr), (size), GFP_KERNEL)
-#define ZXC_FREE(ptr) kfree(ptr)
+/* backport for 4.19: no-I/O scope keeps reclaim out of I/O path; GFP_NOIO loses kvmalloc vmalloc fallback before 5.17. */
+static inline void* zxc_kernel_alloc(size_t size, gfp_t zero) {
+    unsigned int noio = memalloc_noio_save();
+    void* p = kvmalloc(size, GFP_KERNEL | __GFP_NOWARN | zero);
 
-/**
- * @brief Cache-line-aligned allocation for the compression workspace.
- *
- * kmalloc() alignment (ARCH_KMALLOC_MINALIGN) is not guaranteed to satisfy
- * ZXC_CACHE_LINE_SIZE on every architecture, so over-allocate and round up,
- * keeping the original pointer in a slot just below the returned address.
- * Both helpers are static inline so each translation unit gets its own copy
- * (ZXC_ALIGNED_MALLOC is invoked from several library .c files).
- */
-static inline void *zxc_kernel_aligned_alloc(size_t size, size_t alignment)
-{
-	void *mem;
-	void *ptr;
-
-	if (alignment < sizeof(void *))
-		alignment = sizeof(void *);
-	mem = kmalloc(size + alignment + sizeof(void *), GFP_KERNEL);
-	if (!mem)
-		return NULL;
-	ptr = (void *)ALIGN((uintptr_t)mem + sizeof(void *), alignment);
-	((void **)ptr)[-1] = mem;
-	return ptr;
+    memalloc_noio_restore(noio);
+    return p;
 }
 
-static inline void zxc_kernel_aligned_free(void *ptr)
-{
-	if (ptr)
-		kfree(((void **)ptr)[-1]);
+#define ZXC_MALLOC(size) zxc_kernel_alloc((size), 0)
+#define ZXC_CALLOC(nmemb, size) zxc_kernel_alloc(array_size((nmemb), (size)), __GFP_ZERO)
+#define ZXC_FREE(ptr) kvfree(ptr)
+
+// No ZXC_REALLOC: krealloc() wants kmalloc'd memory, and these units never
+// reallocate; a future use fails to build.
+
+// kmalloc need not reach a cache line: align by hand over kvmalloc.
+static inline void* zxc_kernel_aligned_alloc(size_t size, size_t alignment) {
+    void *mem, *ptr;
+    size_t total;
+
+    if (alignment < sizeof(void*)) alignment = sizeof(void*);
+    if (check_add_overflow(size, alignment + sizeof(void*), &total)) return NULL;
+    mem = zxc_kernel_alloc(total, 0);
+    if (!mem) return NULL;
+    ptr = (void*)ALIGN((uintptr_t)mem + sizeof(void*), alignment);
+    ((void**)ptr)[-1] = mem;
+    return ptr;
+}
+
+static inline void zxc_kernel_aligned_free(void* ptr) {
+    if (ptr) kvfree(((void**)ptr)[-1]);
 }
 
 #define ZXC_ALIGNED_MALLOC(size, alignment) zxc_kernel_aligned_alloc((size), (alignment))
 #define ZXC_ALIGNED_FREE(ptr) zxc_kernel_aligned_free(ptr)
-/** @} */
 
-#endif /* ZXC_DEPS_H */
+#endif  // ZXC_DEPS_H
