@@ -73,16 +73,18 @@ static bool zram_dedup_match(struct zram *zram, struct zram_entry *entry,
 	unsigned char *cmem;
 	struct zcomp_strm *zstrm;
 
-	cmem = zs_map_object(zram->mem_pool, entry->handle, ZS_MM_RO);
+	zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
+	cmem = zs_obj_read_begin(zram->mem_pool, entry->handle,
+				 zstrm->local_copy);
 	if (entry->len == PAGE_SIZE) {
 		match = !memcmp(mem, cmem, PAGE_SIZE);
 	} else {
-		zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
-		if (!zcomp_decompress(zstrm, cmem, entry->len, zstrm->buffer))
+		if (!zcomp_decompress(zram->comps[ZRAM_PRIMARY_COMP], zstrm,
+				      cmem, entry->len, zstrm->buffer))
 			match = !memcmp(mem, zstrm->buffer, PAGE_SIZE);
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
 	}
-	zs_unmap_object(zram->mem_pool, entry->handle);
+	zs_obj_read_end(zram->mem_pool, entry->handle, cmem);
+	zcomp_stream_put(zstrm);
 
 	return match;
 }
@@ -190,11 +192,17 @@ struct zram_entry *zram_dedup_find(struct zram *zram, struct page *page,
 	if (!zram_dedup_enabled(zram))
 		return NULL;
 
-	mem = kmap_atomic(page);
+#ifdef CONFIG_HIGHMEM
+	mem = kmap(page);
+#else
+	mem = page_address(page);
+#endif
 	*checksum = zram_dedup_checksum(mem);
 
 	entry = zram_dedup_get(zram, mem, *checksum);
-	kunmap_atomic(mem);
+#ifdef CONFIG_HIGHMEM
+	kunmap(page);
+#endif
 
 	return entry;
 }
