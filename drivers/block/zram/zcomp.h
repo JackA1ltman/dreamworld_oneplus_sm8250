@@ -9,11 +9,18 @@ struct zcomp;
 
 #define ZCOMP_PARAM_NO_LEVEL	INT_MIN
 
+struct deflate_params {
+	s32 winbits;
+};
+
 struct zcomp_params {
 	void *dict;
 	size_t dict_sz;
 	s32 level;
 	u32 dict_gen;
+	union {
+		struct deflate_params deflate;
+	};
 
 	void *drv_data;
 };

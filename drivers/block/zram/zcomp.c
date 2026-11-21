@@ -229,10 +229,12 @@ struct zcomp *__zcomp_create(const char *compress,
 		return ERR_PTR(-ENOMEM);
 
 	comp->name = compress;
-	if (params)
+	if (params) {
 		comp->params = *params;
-	else
+	} else {
 		comp->params.level = ZCOMP_PARAM_NO_LEVEL;
+		comp->params.deflate.winbits = ZCOMP_PARAM_NO_LEVEL;
+	}
 	comp->ops = lookup_backend_ops(compress);
 	if (!comp->ops) {
 		kfree(comp);

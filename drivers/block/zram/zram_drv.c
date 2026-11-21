@@ -33,6 +33,7 @@
 #include <linux/sysfs.h>
 #include <linux/debugfs.h>
 #include <linux/cpuhotplug.h>
+#include <linux/fs.h>
 
 #include "zram_drv.h"
 
@@ -1157,6 +1158,140 @@ static ssize_t max_comp_streams_store(struct device *dev,
 {
 	return len;
 }
+
+static void comp_params_reset(struct zram *zram, u32 prio)
+{
+	struct zcomp_params *params = &zram->params[prio];
+
+	vfree(params->dict);
+	params->level = ZCOMP_PARAM_NO_LEVEL;
+	params->deflate.winbits = ZCOMP_PARAM_NO_LEVEL;
+	params->dict_sz = 0;
+	params->dict = NULL;
+}
+
+static void zram_comp_params_reset(struct zram *zram)
+{
+	u32 prio;
+
+	for (prio = ZRAM_PRIMARY_COMP; prio < ZRAM_MAX_COMPS; prio++)
+		comp_params_reset(zram, prio);
+}
+
+static int comp_params_store(struct zram *zram, u32 prio, s32 level,
+			     const char *dict_path,
+			     struct deflate_params *deflate_params)
+{
+	loff_t sz = 0;
+	int ret;
+
+	comp_params_reset(zram, prio);
+
+	if (dict_path) {
+		ret = kernel_read_file_from_path(dict_path,
+						 &zram->params[prio].dict,
+						 &sz, INT_MAX,
+						 READING_POLICY);
+		if (ret < 0) {
+			zram->params[prio].dict = NULL;
+			return -EINVAL;
+		}
+		zram->params[prio].dict_gen++;
+	}
+
+	zram->params[prio].dict_sz = sz;
+	zram->params[prio].level = level;
+	zram->params[prio].deflate.winbits = deflate_params->winbits;
+	return 0;
+}
+
+static ssize_t algorithm_params_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf,
+				      size_t len)
+{
+	s32 prio = ZRAM_PRIMARY_COMP, level = ZCOMP_PARAM_NO_LEVEL;
+	char *args, *param, *val, *algo = NULL, *dict_path = NULL;
+	struct deflate_params deflate_params;
+	struct zram *zram = dev_to_zram(dev);
+	int ret;
+
+	deflate_params.winbits = ZCOMP_PARAM_NO_LEVEL;
+
+	args = skip_spaces(buf);
+	while (*args) {
+		args = next_arg(args, &param, &val);
+
+		if (!val || !*val)
+			return -EINVAL;
+
+		if (!strcmp(param, "priority")) {
+			ret = kstrtoint(val, 10, &prio);
+			if (ret)
+				return ret;
+			continue;
+		}
+
+		if (!strcmp(param, "level")) {
+			ret = kstrtoint(val, 10, &level);
+			if (ret)
+				return ret;
+			continue;
+		}
+
+		if (!strcmp(param, "algo")) {
+			algo = val;
+			continue;
+		}
+
+		if (!strcmp(param, "dict")) {
+			dict_path = val;
+			continue;
+		}
+
+		if (!strcmp(param, "deflate.winbits")) {
+			ret = kstrtoint(val, 10, &deflate_params.winbits);
+			if (ret)
+				return ret;
+			continue;
+		}
+
+		return -EINVAL;
+	}
+
+	down_write(&zram->init_lock);
+	if (init_done(zram)) {
+		up_write(&zram->init_lock);
+		pr_info("Can't change algorithm params for initialized device\n");
+		return -EBUSY;
+	}
+
+	/* Lookup priority by algorithm name */
+	if (algo) {
+		s32 p;
+
+		prio = -EINVAL;
+		for (p = ZRAM_PRIMARY_COMP; p < ZRAM_MAX_COMPS; p++) {
+			if (!zram->comp_algs[p][0])
+				continue;
+
+			if (!strcmp(zram->comp_algs[p], algo)) {
+				prio = p;
+				break;
+			}
+		}
+	}
+
+	if (prio < ZRAM_PRIMARY_COMP || prio >= ZRAM_MAX_COMPS) {
+		up_write(&zram->init_lock);
+		return -EINVAL;
+	}
+
+	ret = comp_params_store(zram, prio, level, dict_path, &deflate_params);
+	up_write(&zram->init_lock);
+	return ret ? ret : len;
+}
+
 
 static ssize_t comp_algorithm_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -2429,6 +2564,7 @@ static void zram_destroy_comps(struct zram *zram)
 static void zram_reset_device(struct zram *zram)
 {
 	struct zcomp *comps[ZRAM_MAX_COMPS];
+	void *dicts[ZRAM_MAX_COMPS];
 	u32 prio;
 	u64 disksize;
 
@@ -2437,18 +2573,21 @@ static void zram_reset_device(struct zram *zram)
 	zram->limit_pages = 0;
 
 	if (!init_done(zram)) {
+		zram_comp_params_reset(zram);
 		up_write(&zram->init_lock);
 		return;
 	}
 
 	/*
-	 * Detach the comps before releasing init_lock so a concurrent
-	 * disksize_store() cannot install new instances into the array while
-	 * we destroy the old ones.
+	 * Detach the comps and param dicts before releasing init_lock so a
+	 * concurrent disksize_store()/algorithm_params_store() cannot race.
 	 */
 	for (prio = ZRAM_PRIMARY_COMP; prio < ZRAM_MAX_COMPS; prio++) {
 		comps[prio] = zram->comps[prio];
 		zram->comps[prio] = NULL;
+		dicts[prio] = zram->params[prio].dict;
+		zram->params[prio].dict = NULL;
+		comp_params_reset(zram, prio);
 	}
 	zram->num_active_comps = 0;
 	disksize = zram->disksize;
@@ -2462,9 +2601,11 @@ static void zram_reset_device(struct zram *zram)
 	zram_meta_free(zram, disksize);
 	memset(&zram->stats, 0, sizeof(zram->stats));
 	atomic_set(&zram->pp_in_progress, 0);
-	for (prio = ZRAM_PRIMARY_COMP; prio < ZRAM_MAX_COMPS; prio++)
+	for (prio = ZRAM_PRIMARY_COMP; prio < ZRAM_MAX_COMPS; prio++) {
 		if (comps[prio])
 			zcomp_destroy(comps[prio]);
+		vfree(dicts[prio]);
+	}
 	reset_bdev(zram);
 }
 
@@ -2502,7 +2643,8 @@ static ssize_t disksize_store(struct device *dev,
 		if (!zram->comp_algs[prio][0])
 			continue;
 
-		comp = zcomp_create(zram->comp_algs[prio]);
+		comp = zcomp_create(zram->comp_algs[prio],
+				    &zram->params[prio]);
 		if (IS_ERR(comp)) {
 			pr_err("Cannot initialise %s compressing backend\n",
 					zram->comp_algs[prio]);
@@ -2605,6 +2747,7 @@ static DEVICE_ATTR_WO(mem_used_max);
 static DEVICE_ATTR_WO(idle);
 static DEVICE_ATTR_RW(max_comp_streams);
 static DEVICE_ATTR_RW(comp_algorithm);
+static DEVICE_ATTR_WO(algorithm_params);
 #ifdef CONFIG_ZRAM_MULTI_COMP
 static DEVICE_ATTR_RW(recomp_algorithm);
 static DEVICE_ATTR_WO(recompress);
@@ -2631,6 +2774,7 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_idle.attr,
 	&dev_attr_max_comp_streams.attr,
 	&dev_attr_comp_algorithm.attr,
+	&dev_attr_algorithm_params.attr,
 #ifdef CONFIG_ZRAM_MULTI_COMP
 	&dev_attr_recomp_algorithm.attr,
 	&dev_attr_recompress.attr,
@@ -2681,6 +2825,7 @@ static int zram_add(void)
 
 	init_rwsem(&zram->init_lock);
 	atomic_set(&zram->pp_in_progress, 0);
+	zram_comp_params_reset(zram);
 #ifdef CONFIG_ZRAM_WRITEBACK
 	spin_lock_init(&zram->wb_limit_lock);
 #endif
