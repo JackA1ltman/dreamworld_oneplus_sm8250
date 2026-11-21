@@ -33,12 +33,8 @@ static int lzorle_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
 {
 	int ret;
 
-	/*
-	 * This tree does not export lzorle1x_1_compress(). Fall back to the
-	 * available LZO compressor so the lzo-rle backend remains buildable.
-	 */
-	ret = lzo1x_1_compress(req->src, req->src_len, req->dst,
-			       &req->dst_len, ctx->context);
+	ret = lzorle1x_1_compress(req->src, req->src_len, req->dst,
+				  &req->dst_len, ctx->context);
 	return ret == LZO_E_OK ? 0 : ret;
 }
 

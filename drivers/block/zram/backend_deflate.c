@@ -7,7 +7,7 @@
 
 #include "backend_deflate.h"
 
-#define DEFLATE_DEF_WINBITS	11
+#define DEFLATE_DEF_WINBITS	(-11)
 #define DEFLATE_DEF_MEMLEVEL	MAX_MEM_LEVEL
 
 struct deflate_ctx {
@@ -56,13 +56,13 @@ static int deflate_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
 		return -ENOMEM;
 
 	ctx->context = zctx;
-	sz = zlib_deflate_workspacesize(-DEFLATE_DEF_WINBITS, MAX_MEM_LEVEL);
+	sz = zlib_deflate_workspacesize(DEFLATE_DEF_WINBITS, MAX_MEM_LEVEL);
 	zctx->cctx.workspace = vzalloc(sz);
 	if (!zctx->cctx.workspace)
 		goto error;
 
 	ret = zlib_deflateInit2(&zctx->cctx, params->level, Z_DEFLATED,
-				-DEFLATE_DEF_WINBITS, DEFLATE_DEF_MEMLEVEL,
+				DEFLATE_DEF_WINBITS, DEFLATE_DEF_MEMLEVEL,
 				Z_DEFAULT_STRATEGY);
 	if (ret != Z_OK)
 		goto error;
@@ -72,7 +72,7 @@ static int deflate_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
 	if (!zctx->dctx.workspace)
 		goto error;
 
-	ret = zlib_inflateInit2(&zctx->dctx, -DEFLATE_DEF_WINBITS);
+	ret = zlib_inflateInit2(&zctx->dctx, DEFLATE_DEF_WINBITS);
 	if (ret != Z_OK)
 		goto error;
 
