@@ -417,6 +417,8 @@ static ssize_t writeback_limit_store(struct device *dev,
 	if (kstrtoull(buf, 10, &val))
 		return ret;
 
+	val = rounddown(val, PAGE_SIZE / 4096);
+
 	down_read(&zram->init_lock);
 	spin_lock(&zram->wb_limit_lock);
 	zram->bd_wb_limit = val;
@@ -674,66 +676,170 @@ static int read_from_bdev_async(struct zram *zram, struct bio_vec *bvec,
 	return 1;
 }
 
-#define PAGE_WB_SIG "page_index="
-#define PAGE_WRITEBACK 0
-#define HUGE_WRITEBACK (1 << 0)
-#define IDLE_WRITEBACK (1 << 1)
+#define PAGE_WRITEBACK			0
+#define HUGE_WRITEBACK			(1 << 0)
+#define IDLE_WRITEBACK			(1 << 1)
+#define INCOMPRESSIBLE_WRITEBACK	(1 << 2)
+
+static int parse_wb_page_index(char *val, unsigned long nr_pages,
+			       unsigned long *lo, unsigned long *hi)
+{
+	int ret;
+
+	ret = kstrtoul(val, 10, lo);
+	if (ret)
+		return ret;
+	if (*lo >= nr_pages)
+		return -EINVAL;
+	*hi = *lo + 1;
+	return 0;
+}
+
+static int parse_wb_page_indexes(char *val, unsigned long nr_pages,
+				 unsigned long *lo, unsigned long *hi)
+{
+	char *delim;
+	int ret;
+
+	delim = strchr(val, '-');
+	if (!delim)
+		return -EINVAL;
+
+	*delim = 0x00;
+	ret = kstrtoul(val, 10, lo);
+	if (ret)
+		return ret;
+	if (*lo >= nr_pages)
+		return -EINVAL;
+
+	ret = kstrtoul(delim + 1, 10, hi);
+	if (ret)
+		return ret;
+	if (*hi >= nr_pages || *lo > *hi)
+		return -EINVAL;
+	*hi += 1;
+	return 0;
+}
+
+static int parse_wb_mode(const char *val, u32 *mode)
+{
+	*mode = 0;
+
+	if (!strcmp(val, "idle"))
+		*mode = IDLE_WRITEBACK;
+	else if (!strcmp(val, "huge"))
+		*mode = HUGE_WRITEBACK;
+	else if (!strcmp(val, "huge_idle"))
+		*mode = IDLE_WRITEBACK | HUGE_WRITEBACK;
+	else if (!strcmp(val, "incompressible"))
+		*mode = INCOMPRESSIBLE_WRITEBACK;
+
+	if (*mode == 0)
+		return -EINVAL;
+	return 0;
+}
 
 static ssize_t writeback_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct zram *zram = dev_to_zram(dev);
 	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
-	unsigned long index = 0;
-	unsigned long start_index = 0;
+	unsigned long index = 0, lo = 0, hi = nr_pages;
 	struct bio bio;
 	struct bio_vec bio_vec;
-	struct page *page;
+	struct page *page = NULL;
 	ssize_t ret;
-	int mode = -1;
+	u32 mode = 0;
 	unsigned long blk_idx = 0;
-
-	if (sysfs_streq(buf, "idle"))
-		mode = IDLE_WRITEBACK;
-	else if (sysfs_streq(buf, "huge"))
-		mode = HUGE_WRITEBACK;
-	else if (sysfs_streq(buf, "huge_idle"))
-		mode = HUGE_WRITEBACK | IDLE_WRITEBACK;
-	else if (sysfs_streq(buf, "incompressible"))
-		mode = HUGE_WRITEBACK;
-	else {
-		if (strncmp(buf, PAGE_WB_SIG, sizeof(PAGE_WB_SIG) - 1))
-			return -EINVAL;
-
-		if (kstrtoul(buf + sizeof(PAGE_WB_SIG) - 1, 10, &start_index) ||
-		    start_index >= nr_pages)
-			return -EINVAL;
-
-		nr_pages = 1;
-		mode = PAGE_WRITEBACK;
-	}
+	char *args, *param, *val;
+	bool have_action = false;
+	int err;
 
 	down_read(&zram->init_lock);
 	if (!init_done(zram)) {
-		ret = -EINVAL;
-		goto release_init_lock;
+		up_read(&zram->init_lock);
+		return -EINVAL;
+	}
+
+	/* Do not permit concurrent post-processing actions. */
+	if (atomic_xchg(&zram->pp_in_progress, 1)) {
+		up_read(&zram->init_lock);
+		return -EAGAIN;
 	}
 
 	if (!zram->backing_dev) {
 		ret = -ENODEV;
-		goto release_init_lock;
+		goto release_pp;
+	}
+
+	args = skip_spaces(buf);
+	while (*args) {
+		args = next_arg(args, &param, &val);
+
+		/*
+		 * Support both the legacy valueless mode parameter
+		 * ("idle", "huge", "huge_idle", "incompressible") and the
+		 * v6.18 key=value interface ("type=", "page_index=",
+		 * "page_indexes=").
+		 */
+		if (!val || !*val) {
+			err = parse_wb_mode(param, &mode);
+			if (err) {
+				ret = err;
+				goto release_pp;
+			}
+			have_action = true;
+			break;
+		}
+
+		if (!strcmp(param, "type")) {
+			err = parse_wb_mode(val, &mode);
+			if (err) {
+				ret = err;
+				goto release_pp;
+			}
+			have_action = true;
+			continue;
+		}
+
+		if (!strcmp(param, "page_index")) {
+			err = parse_wb_page_index(val, nr_pages, &lo, &hi);
+			if (err) {
+				ret = err;
+				goto release_pp;
+			}
+			have_action = true;
+			continue;
+		}
+
+		if (!strcmp(param, "page_indexes")) {
+			err = parse_wb_page_indexes(val, nr_pages, &lo, &hi);
+			if (err) {
+				ret = err;
+				goto release_pp;
+			}
+			have_action = true;
+			continue;
+		}
+
+		ret = -EINVAL;
+		goto release_pp;
+	}
+
+	if (!have_action) {
+		ret = -EINVAL;
+		goto release_pp;
 	}
 
 	page = alloc_page(GFP_KERNEL);
 	if (!page) {
 		ret = -ENOMEM;
-		goto release_init_lock;
+		goto release_pp;
 	}
 
 	ret = len;
-	for (index = start_index; nr_pages != 0; index++, nr_pages--) {
+	for (index = lo; index < hi; index++) {
 		struct bio_vec bvec;
-		int err;
 
 		bvec.bv_page = page;
 		bvec.bv_len = PAGE_SIZE;
@@ -770,6 +876,9 @@ static ssize_t writeback_store(struct device *dev,
 		if ((mode & HUGE_WRITEBACK) &&
 		    !zram_test_flag(zram, index, ZRAM_HUGE))
 			goto next;
+		if ((mode & INCOMPRESSIBLE_WRITEBACK) &&
+		    !zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
+			goto next;
 		/*
 		 * Clearing ZRAM_UNDER_WB is duty of caller.
 		 * IOW, zram_free_page never clear it.
@@ -783,6 +892,7 @@ static ssize_t writeback_store(struct device *dev,
 			zram_clear_flag(zram, index, ZRAM_UNDER_WB);
 			zram_clear_flag(zram, index, ZRAM_IDLE);
 			zram_slot_unlock(zram, index);
+			cond_resched();
 			continue;
 		}
 
@@ -804,6 +914,7 @@ static ssize_t writeback_store(struct device *dev,
 			zram_clear_flag(zram, index, ZRAM_UNDER_WB);
 			zram_clear_flag(zram, index, ZRAM_IDLE);
 			zram_slot_unlock(zram, index);
+			cond_resched();
 			continue;
 		}
 
@@ -837,12 +948,14 @@ static ssize_t writeback_store(struct device *dev,
 		spin_unlock(&zram->wb_limit_lock);
 next:
 		zram_slot_unlock(zram, index);
+		cond_resched();
 	}
 
 	if (blk_idx)
 		free_block_bdev(zram, blk_idx);
 	__free_page(page);
-release_init_lock:
+release_pp:
+	atomic_set(&zram->pp_in_progress, 0);
 	up_read(&zram->init_lock);
 
 	return ret;
@@ -1118,7 +1231,7 @@ static ssize_t recomp_algorithm_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct zram *zram = dev_to_zram(dev);
-	char compressor[CRYPTO_MAX_ALG_NAME] = { 0, };
+	char compressor[ZRAM_MAX_ALGO_NAME_SZ] = { 0, };
 	int prio = ZRAM_SECONDARY_COMP;
 	char *args, *param, *val;
 	size_t sz;
@@ -1966,8 +2079,14 @@ static ssize_t recompress_store(struct device *dev,
 
 	down_read(&zram->init_lock);
 	if (!init_done(zram)) {
-		ret = -EINVAL;
-		goto release_init_lock;
+		up_read(&zram->init_lock);
+		return -EINVAL;
+	}
+
+	/* Do not permit concurrent post-processing actions. */
+	if (atomic_xchg(&zram->pp_in_progress, 1)) {
+		up_read(&zram->init_lock);
+		return -EAGAIN;
 	}
 
 	if (prio_param &&
@@ -2055,6 +2174,7 @@ next:
 	__free_page(page);
 
 release_init_lock:
+	atomic_set(&zram->pp_in_progress, 0);
 	up_read(&zram->init_lock);
 	return ret;
 }
@@ -2322,6 +2442,7 @@ static void zram_reset_device(struct zram *zram)
 	/* I/O operation under all of CPU are done so let's free */
 	zram_meta_free(zram, disksize);
 	memset(&zram->stats, 0, sizeof(zram->stats));
+	atomic_set(&zram->pp_in_progress, 0);
 	for (prio = ZRAM_PRIMARY_COMP; prio < ZRAM_MAX_COMPS; prio++)
 		if (comps[prio])
 			zcomp_destroy(comps[prio]);
@@ -2540,6 +2661,7 @@ static int zram_add(void)
 	device_id = ret;
 
 	init_rwsem(&zram->init_lock);
+	atomic_set(&zram->pp_in_progress, 0);
 #ifdef CONFIG_ZRAM_WRITEBACK
 	spin_lock_init(&zram->wb_limit_lock);
 #endif

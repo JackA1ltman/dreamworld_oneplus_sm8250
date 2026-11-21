@@ -17,11 +17,12 @@
 
 #include <linux/rwsem.h>
 #include <linux/zsmalloc.h>
-#include <linux/crypto.h>
 #include <linux/spinlock.h>
 
 #include "zcomp.h"
 #include "zram_dedup.h"
+
+#define ZRAM_MAX_ALGO_NAME_SZ	128
 
 #define SECTORS_PER_PAGE_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
 #define SECTORS_PER_PAGE	(1 << SECTORS_PER_PAGE_SHIFT)
@@ -159,12 +160,13 @@ struct zram {
 	 * we can store in a disk.
 	 */
 	u64 disksize;	/* bytes */
-	char comp_algs[ZRAM_MAX_COMPS][CRYPTO_MAX_ALG_NAME];
+	char comp_algs[ZRAM_MAX_COMPS][ZRAM_MAX_ALGO_NAME_SZ];
 	/*
 	 * zram is claimed so open request will be failed
 	 */
 	bool claim; /* Protected by bdev->bd_mutex */
 	bool use_dedup;
+	atomic_t pp_in_progress;
 	struct file *backing_dev;
 #ifdef CONFIG_ZRAM_WRITEBACK
 	spinlock_t wb_limit_lock;
