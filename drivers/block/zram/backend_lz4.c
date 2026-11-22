@@ -3,7 +3,6 @@
 #include <linux/kernel.h>
 #include <linux/lz4.h>
 #include <linux/slab.h>
-#include <linux/string.h>
 #include <linux/vmalloc.h>
 
 #include "backend_lz4.h"
@@ -14,33 +13,14 @@ struct lz4_ctx {
 	LZ4_stream_t *cstrm;
 };
 
-struct lz4_drv {
-	/* template compression stream preloaded with the current dictionary */
-	LZ4_stream_t base_cstream;
-	u32 dict_gen;
-	bool base_c_valid;
-};
-
 static void lz4_release_params(struct zcomp_params *params)
 {
-	kfree(params->drv_data);
-	params->drv_data = NULL;
 }
 
 static int lz4_setup_params(struct zcomp_params *params)
 {
-	struct lz4_drv *drv;
-
 	if (params->level == ZCOMP_PARAM_NO_LEVEL)
 		params->level = LZ4_ACCELERATION_DEFAULT;
-
-	drv = kzalloc(sizeof(*drv), GFP_KERNEL);
-	if (!drv)
-		return -ENOMEM;
-
-	drv->dict_gen = 0;
-	drv->base_c_valid = false;
-	params->drv_data = drv;
 
 	return 0;
 }
@@ -88,30 +68,10 @@ error:
 	return -ENOMEM;
 }
 
-static int lz4_build_base_cstream(struct zcomp_params *params)
-{
-	struct lz4_drv *drv = params->drv_data;
-	int ret;
-
-	if (!params->dict || !params->dict_sz)
-		return -EINVAL;
-
-	memset(&drv->base_cstream, 0, sizeof(drv->base_cstream));
-
-	ret = LZ4_loadDict(&drv->base_cstream, params->dict, params->dict_sz);
-	if (ret != params->dict_sz)
-		return -EINVAL;
-
-	drv->dict_gen = params->dict_gen;
-	drv->base_c_valid = true;
-	return 0;
-}
-
 static int lz4_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
 			struct zcomp_req *req)
 {
 	struct lz4_ctx *zctx = ctx->context;
-	struct lz4_drv *drv = params->drv_data;
 	int ret;
 
 	if (!zctx->cstrm) {
@@ -119,18 +79,10 @@ static int lz4_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
 					req->dst_len, params->level,
 					zctx->mem);
 	} else {
-		/*
-		 * The dictionary preprocessing in LZ4_loadDict() is expensive.
-		 * Build a template stream once and clone it into the per-stream
-		 * context for subsequent compressions.
-		 */
-		if (!drv->base_c_valid || drv->dict_gen != params->dict_gen) {
-			ret = lz4_build_base_cstream(params);
-			if (ret)
-				return ret;
-		}
-
-		memcpy(zctx->cstrm, &drv->base_cstream, sizeof(*zctx->cstrm));
+		/* Cstrm needs to be reset */
+		ret = LZ4_loadDict(zctx->cstrm, params->dict, params->dict_sz);
+		if (ret != params->dict_sz)
+			return -EINVAL;
 		ret = LZ4_compress_fast_continue(zctx->cstrm, req->src,
 						 req->dst, req->src_len,
 						 req->dst_len, params->level);
