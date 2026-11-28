@@ -669,7 +669,6 @@ enum qca_nl80211_vendor_subcmds {
 	QCA_NL80211_VENDOR_SUBCMD_DRIVER_DISCONNECT_REASON = 189,
 	QCA_NL80211_VENDOR_SUBCMD_CONFIG_TWT = 191,
 	QCA_NL80211_VENDOR_SUBCMD_GETBAND = 192,
-
 #ifdef OPLUS_ARCH_INJECT
 	// We need a common value to let this function work on dfferent QCOM plaftom
 	// which may have different SUBCMD defination, so assign a more large number for
